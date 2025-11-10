@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project specific - do not upload to git
+AGENTS.md
+CLAUDE.md
+
+# Application bundles (generated)
+*.app
+
+# DMG files (generated)
+*.dmg
+
+# PyInstaller
+*.manifest
+*.spec.log
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.cache/

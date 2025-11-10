@@ -1,0 +1,15 @@
+# Core dependencies for Phase 1
+ebooklib==0.18        # ePub generation
+pyperclip==1.8.2      # Clipboard access
+pynput==1.7.6         # Global hotkey capture
+
+# Additional dependencies for better functionality
+lxml==4.9.3           # Required by ebooklib for better XML handling
+python-dateutil==2.8.2 # Better date handling for metadata
+
+# Development dependencies
+black==23.11.0        # Code formatting
+flake8==6.1.0         # Linting
+
+# UI dependency for modern settings window (Qt)
+PySide6               # Cross-platform Qt bindings

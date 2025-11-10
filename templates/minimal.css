@@ -1,0 +1,68 @@
+/* Minimal CSS for ePub */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    line-height: 1.5;
+    margin: 1em;
+    color: #333;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+
+h1 {
+    font-size: 1.8em;
+}
+
+h2 {
+    font-size: 1.4em;
+}
+
+h3 {
+    font-size: 1.2em;
+}
+
+p {
+    margin: 0.5em 0;
+}
+
+blockquote {
+    margin: 1em 0;
+    padding-left: 1em;
+    border-left: 2px solid #e0e0e0;
+}
+
+code {
+    font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    font-size: 0.95em;
+}
+
+pre {
+    font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    font-size: 0.95em;
+    padding: 0.5em;
+    overflow-x: auto;
+}
+
+a {
+    color: #000;
+    text-decoration: underline;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+}
+
+ul, ol {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #e0e0e0;
+    margin: 1.5em 0;
+}

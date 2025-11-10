@@ -1,0 +1,106 @@
+/* Default CSS for ePub */
+body {
+    font-family: 'Georgia', 'Times New Roman', serif;
+    line-height: 1.6;
+    margin: 1em;
+    text-align: justify;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Helvetica Neue', 'Arial', sans-serif;
+    line-height: 1.2;
+    margin-top: 1em;
+    margin-bottom: 0.5em;
+    page-break-after: avoid;
+}
+
+h1 {
+    font-size: 2em;
+    text-align: center;
+    margin-top: 2em;
+}
+
+h2 {
+    font-size: 1.5em;
+}
+
+h3 {
+    font-size: 1.3em;
+}
+
+p {
+    text-indent: 1.5em;
+    margin: 0;
+    orphans: 2;
+    widows: 2;
+}
+
+p:first-child,
+p:first-of-type {
+    text-indent: 0;
+}
+
+blockquote {
+    margin: 1em 2em;
+    font-style: italic;
+    border-left: 3px solid #ccc;
+    padding-left: 1em;
+}
+
+code {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    background: #f4f4f4;
+    padding: 0.2em 0.4em;
+}
+
+pre {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    background: #f4f4f4;
+    padding: 1em;
+    overflow-x: auto;
+    white-space: pre-wrap;
+}
+
+a {
+    color: #0066cc;
+    text-decoration: none;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+
+ul, ol {
+    margin: 1em 0;
+    padding-left: 2em;
+}
+
+li {
+    margin: 0.3em 0;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #ccc;
+    margin: 2em 0;
+}
+
+.chapter {
+    page-break-before: always;
+}
+
+.title-page {
+    text-align: center;
+    margin-top: 30%;
+}
+
+.metadata {
+    text-align: center;
+    font-style: italic;
+    margin: 2em 0;
+}
