@@ -47,7 +47,7 @@ def save_config(config: dict) -> bool:
 # Try importing PySide6; fallback to Tkinter module if missing
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QIcon
+    from PySide6.QtGui import QIcon, QKeySequence
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -64,6 +64,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QKeySequenceEdit,
         QScrollArea,
         QSpinBox,
         QTabWidget,
@@ -104,6 +105,38 @@ def list_available_styles() -> list[str]:
 
 
 if HAVE_QT:
+    def _normalize_for_qt(seq_text: str) -> str:
+        # Convert stored format like 'cmd+shift+e' to Qt-friendly 'Meta+Shift+E'
+        if not seq_text:
+            return ""
+        parts = [p.strip().lower() for p in seq_text.split("+") if p.strip()]
+        out: list[str] = []
+        for p in parts:
+            if p in ("cmd", "command", "meta"):
+                out.append("Meta")
+            elif p in ("ctrl", "control"):
+                out.append("Ctrl")
+            elif p == "shift":
+                out.append("Shift")
+            elif p in ("alt", "option"):
+                out.append("Alt")
+            else:
+                out.append(p.upper())
+        return "+".join(out)
+
+    def _normalize_from_qt(seq: QKeySequence) -> str:
+        # Convert Qt sequence to portable lower-case like 'cmd+shift+e' on mac, 'ctrl+shift+e' otherwise
+        if not seq or seq.isEmpty():
+            return DEFAULTS["hotkey"]
+        text = seq.toString(QKeySequence.PortableText)  # e.g., 'Meta+Shift+E'
+        parts = [p.strip().lower() for p in text.split("+") if p.strip()]
+        out: list[str] = []
+        for p in parts:
+            if p == "meta":
+                out.append("cmd")
+            else:
+                out.append(p)
+        return "+".join(out)
 
     class SettingsDialog(QDialog):
         def __init__(self, config: dict, parent: QWidget | None = None):
@@ -153,6 +186,24 @@ if HAVE_QT:
             row_layout.addWidget(self.output_edit)
             row_layout.addWidget(browse_btn)
             form.addRow("Output Directory:", row)
+
+            # Hotkey (capture)
+            hotkey_row = QWidget()
+            hotkey_layout = QHBoxLayout(hotkey_row)
+            self.hotkey_edit = QKeySequenceEdit()
+            try:
+                qt_seq = QKeySequence(_normalize_for_qt(self.config.get("hotkey", DEFAULTS["hotkey"])) )
+                self.hotkey_edit.setKeySequence(qt_seq)
+            except Exception:
+                # Fallback to default
+                self.hotkey_edit.setKeySequence(QKeySequence(_normalize_for_qt(DEFAULTS["hotkey"])) )
+            reset_hotkey_btn = QPushButton("Reset")
+            def _reset_hotkey():
+                self.hotkey_edit.setKeySequence(QKeySequence(_normalize_for_qt(DEFAULTS["hotkey"])) )
+            reset_hotkey_btn.clicked.connect(_reset_hotkey)
+            hotkey_layout.addWidget(self.hotkey_edit, stretch=1)
+            hotkey_layout.addWidget(reset_hotkey_btn)
+            form.addRow("Capture Hotkey:", hotkey_row)
 
             # Author
             self.author_edit = QLineEdit(self.config["author"])
@@ -213,10 +264,9 @@ if HAVE_QT:
 
             # Info
             cfg_path_text = str(paths.get_config_path())
-            default_hotkey_text = "Ctrl+Shift+E" if sys.platform.startswith("win") else "Cmd+Shift+E"
             info = QLabel(
                 f"Config Location: {cfg_path_text}\n"
-                f"Hotkey: {default_hotkey_text} (not configurable yet)"
+                f"Current Hotkey: {self.config.get('hotkey', DEFAULTS['hotkey']).upper()}"
             )
             info.setTextInteractionFlags(Qt.TextSelectableByMouse)
             form.addRow(info)
@@ -237,7 +287,7 @@ if HAVE_QT:
             # Gather values and persist
             cfg = {
                 "output_directory": self.output_edit.text().strip() or DEFAULTS["output_directory"],
-                "hotkey": self.config.get("hotkey", DEFAULTS["hotkey"]),
+                "hotkey": _normalize_from_qt(self.hotkey_edit.keySequence()),
                 "author": self.author_edit.text().strip() or DEFAULTS["author"],
                 "language": self.language_combo.currentText(),
                 "style": self.style_combo.currentText(),

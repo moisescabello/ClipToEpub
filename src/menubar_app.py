@@ -131,10 +131,23 @@ class ClipToEpubApp(rumps.App):
                         combo.add(keyboard.Key.ctrl)
                     elif p in ("cmd", "command", "meta"):
                         combo.add(keyboard.Key.cmd)
+                    elif p in ("alt", "option"):
+                        combo.add(keyboard.Key.alt)
                     elif p == "shift":
                         combo.add(keyboard.Key.shift)
                     elif len(p) == 1:
                         combo.add(keyboard.KeyCode.from_char(p))
+                    elif p.startswith('f') and p[1:].isdigit():
+                        try:
+                            combo.add(getattr(keyboard.Key, p))
+                        except AttributeError:
+                            pass
+                    elif p in ("space", "tab", "enter", "return", "backspace", "esc", "escape"):
+                        key_name = "esc" if p == "escape" else ("enter" if p == "return" else p)
+                        try:
+                            combo.add(getattr(keyboard.Key, key_name))
+                        except AttributeError:
+                            pass
                 return combo or None
 
             hotkey_combo = parse_hotkey_string(self.config.get("hotkey"))

@@ -63,6 +63,8 @@ class ConfigWindow:
         try:
             # Update config from GUI elements
             self.config["output_directory"] = self.output_var.get()
+            # Normalize hotkey string
+            self.config["hotkey"] = self._normalize_hotkey(self.hotkey_var.get())
             self.config["author"] = self.author_var.get()
             self.config["language"] = self.language_var.get()
             self.config["style"] = self.style_var.get()
@@ -171,13 +173,34 @@ class ConfigWindow:
         ttk.Entry(output_frame, textvariable=self.output_var, width=40).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(output_frame, text="Browse...", command=self.browse_folder).pack(side=tk.LEFT)
 
+        # Hotkey
+        ttk.Label(main_frame, text="Capture Hotkey:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.hotkey_var = tk.StringVar(value=self.config.get("hotkey", self.default_config["hotkey"]))
+        hotkey_frame = ttk.Frame(main_frame)
+        hotkey_frame.grid(row=3, column=1, sticky=(tk.W), pady=5)
+        self.hotkey_entry = ttk.Entry(hotkey_frame, textvariable=self.hotkey_var, width=30)
+        self.hotkey_entry.pack(side=tk.LEFT)
+        self._recording_hotkey = False
+        def _toggle_record():
+            if not self._recording_hotkey:
+                self._start_hotkey_record()
+                record_btn.configure(text="Stop")
+            else:
+                self._stop_hotkey_record()
+                record_btn.configure(text="Record")
+        record_btn = ttk.Button(hotkey_frame, text="Record", command=_toggle_record)
+        record_btn.pack(side=tk.LEFT, padx=(5, 0))
+        def _reset_hotkey():
+            self.hotkey_var.set(self.default_config["hotkey"])
+        ttk.Button(hotkey_frame, text="Reset", command=_reset_hotkey).pack(side=tk.LEFT, padx=(5, 0))
+
         # Author
-        ttk.Label(main_frame, text="Default Author:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Default Author:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.author_var = tk.StringVar(value=self.config["author"])
-        ttk.Entry(main_frame, textvariable=self.author_var, width=30).grid(row=3, column=1, sticky=tk.W, pady=5)
+        ttk.Entry(main_frame, textvariable=self.author_var, width=30).grid(row=4, column=1, sticky=tk.W, pady=5)
 
         # Language
-        ttk.Label(main_frame, text="Language:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Language:").grid(row=5, column=0, sticky=tk.W, pady=5)
         self.language_var = tk.StringVar(value=self.config["language"])
         language_combo = ttk.Combobox(
             main_frame,
@@ -186,10 +209,10 @@ class ConfigWindow:
             width=27,
             state="readonly"
         )
-        language_combo.grid(row=4, column=1, sticky=tk.W, pady=5)
+        language_combo.grid(row=5, column=1, sticky=tk.W, pady=5)
 
         # Style (populate from templates dir if present)
-        ttk.Label(main_frame, text="CSS Style:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="CSS Style:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.style_var = tk.StringVar(value=self.config["style"])
         styles = ["default", "minimal", "modern"]
         try:
@@ -208,18 +231,18 @@ class ConfigWindow:
             width=27,
             state="readonly"
         )
-        style_combo.grid(row=5, column=1, sticky=tk.W, pady=5)
+        style_combo.grid(row=6, column=1, sticky=tk.W, pady=5)
 
         # Chapter Words
-        ttk.Label(main_frame, text="Words per Chapter:").grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Words per Chapter:").grid(row=7, column=0, sticky=tk.W, pady=5)
         self.chapter_words_var = tk.StringVar(value=str(self.config["chapter_words"]))
         chapter_frame = ttk.Frame(main_frame)
-        chapter_frame.grid(row=6, column=1, sticky=tk.W, pady=5)
+        chapter_frame.grid(row=7, column=1, sticky=tk.W, pady=5)
         ttk.Entry(chapter_frame, textvariable=self.chapter_words_var, width=10).pack(side=tk.LEFT)
         ttk.Label(chapter_frame, text="(100-50000)").pack(side=tk.LEFT, padx=(5, 0))
 
         # Separator
-        ttk.Separator(main_frame, orient='horizontal').grid(row=7, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15)
+        ttk.Separator(main_frame, orient='horizontal').grid(row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15)
 
         # Checkboxes
         self.auto_open_var = tk.BooleanVar(value=self.config["auto_open"])
@@ -227,24 +250,23 @@ class ConfigWindow:
             main_frame,
             text="Auto-open ePub files after creation",
             variable=self.auto_open_var
-        ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=5)
+        ).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         self.notifications_var = tk.BooleanVar(value=self.config["show_notifications"])
         ttk.Checkbutton(
             main_frame,
             text="Show notifications",
             variable=self.notifications_var
-        ).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=5)
+        ).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=5)
 
         # Separator
-        ttk.Separator(main_frame, orient='horizontal').grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15)
+        ttk.Separator(main_frame, orient='horizontal').grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15)
 
         # Info section
         info_frame = ttk.LabelFrame(main_frame, text="Info", padding="10")
-        info_frame.grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        info_frame.grid(row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
 
-        hotkey_text = "Ctrl+Shift+E" if sys.platform.startswith("win") else "Cmd+Shift+E"
-        info_text = f"Hotkey: {hotkey_text} (not configurable yet)\n"
+        info_text = f"Current Hotkey: {self.config.get('hotkey', self.default_config['hotkey']).upper()}\n"
         info_text += f"Config Location: {self.config_path}\n"
         info_text += f"ePubs Saved To: {self.config['output_directory']}"
 
@@ -252,7 +274,7 @@ class ConfigWindow:
 
         # Buttons
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=12, column=0, columnspan=2, pady=(20, 0))
+        button_frame.grid(row=13, column=0, columnspan=2, pady=(20, 0))
 
         ttk.Button(
             button_frame,
@@ -284,12 +306,107 @@ class ConfigWindow:
         """Reset all settings to defaults"""
         if messagebox.askyesno("Reset Defaults", "Are you sure you want to reset all settings to defaults?"):
             self.output_var.set(self.default_config["output_directory"])
+            self.hotkey_var.set(self.default_config["hotkey"])
             self.author_var.set(self.default_config["author"])
             self.language_var.set(self.default_config["language"])
             self.style_var.set(self.default_config["style"])
             self.auto_open_var.set(self.default_config["auto_open"])
             self.notifications_var.set(self.default_config["show_notifications"])
             self.chapter_words_var.set(str(self.default_config["chapter_words"]))
+
+    # ---- Hotkey capture helpers ----
+    def _start_hotkey_record(self):
+        self._recording_hotkey = True
+        # Bind on the toplevel so it catches modifiers too
+        self.root.bind("<KeyPress>", self._on_hotkey_keypress)
+        self.root.bind("<KeyRelease>", self._on_hotkey_keyrelease)
+        # Visual cue
+        try:
+            self.hotkey_entry.configure(foreground="#004085")
+        except Exception:
+            pass
+
+    def _stop_hotkey_record(self):
+        self._recording_hotkey = False
+        try:
+            self.root.unbind("<KeyPress>")
+            self.root.unbind("<KeyRelease>")
+            self.hotkey_entry.configure(foreground="black")
+        except Exception:
+            pass
+
+    def _on_hotkey_keyrelease(self, event):
+        # No-op; we compute on press
+        pass
+
+    def _on_hotkey_keypress(self, event):
+        if not self._recording_hotkey:
+            return
+        # Build modifiers from state
+        state = int(getattr(event, 'state', 0))
+        mods = []
+        # Shift
+        if state & 0x0001:
+            mods.append("shift")
+        # Control
+        if state & 0x0004:
+            mods.append("ctrl")
+        # Alt/Option
+        if state & 0x0008:
+            mods.append("alt")
+        # Meta/Command – best-effort masks used by Tk across platforms
+        if sys.platform == 'darwin':
+            if state & 0x0010 or state & 0x0040:
+                mods.append("cmd")
+        else:
+            # On other platforms, Meta may map to 0x0040
+            if state & 0x0040:
+                mods.append("cmd")
+
+        # Determine main key
+        keysym = getattr(event, 'keysym', '')
+        key = None
+        if len(keysym) == 1 and keysym.isprintable():
+            key = keysym.lower()
+        elif keysym and keysym.upper().startswith('F') and keysym[1:].isdigit():
+            key = keysym.lower()  # e.g., 'f5'
+        elif keysym in ("space", "tab", "return", "enter", "backspace", "minus", "equal", "bracketleft", "bracketright", "semicolon", "apostrophe", "comma", "period", "slash"):
+            key = keysym.lower()
+
+        if key is None:
+            # Update entry with modifiers while waiting for a main key
+            self.hotkey_var.set("+".join(mods))
+            return
+
+        parts = mods + [key]
+        # Ensure at least one modifier
+        if not mods:
+            # Default to ctrl on non-mac, cmd on mac if none pressed
+            if sys.platform == 'darwin':
+                parts = ["cmd", key]
+            else:
+                parts = ["ctrl", key]
+        self.hotkey_var.set("+".join(parts))
+        # Stop recording after a complete sequence
+        self._stop_hotkey_record()
+
+    def _normalize_hotkey(self, text: str) -> str:
+        if not text:
+            return self.default_config["hotkey"]
+        parts = [p.strip().lower() for p in text.split("+") if p.strip()]
+        out = []
+        for p in parts:
+            if p in ("control", "ctrl"):
+                out.append("ctrl")
+            elif p in ("command", "meta", "cmd"):
+                out.append("cmd")
+            elif p in ("shift",):
+                out.append("shift")
+            elif p in ("alt", "option"):
+                out.append("alt")
+            else:
+                out.append(p)
+        return "+".join(out)
 
     def run(self):
         """Run the configuration window"""
