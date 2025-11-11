@@ -100,7 +100,7 @@ class AdvancedClipboardToEpubConverter:
         self.conversion_callback = None
         self.error_callback = None
 
-        # Async event loop
+        # Async executor (we create event loops on demand per call)
         self.loop = None
         self.executor = None
 
@@ -113,23 +113,13 @@ class AdvancedClipboardToEpubConverter:
         logger.info(f"Output directory: {self.output_dir}")
 
     def setup_async(self):
-        """Set up async processing"""
+        """Set up async processing (executor only)."""
         try:
-            # Try to get existing event loop or create new one
-            try:
-                self.loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # No running loop, create a new one
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
-
-            # Create thread pool executor for CPU-bound tasks
             from concurrent.futures import ThreadPoolExecutor
             self.executor = ThreadPoolExecutor(max_workers=self.max_async_workers)
-
-            logger.info(f"Async processing initialized with {self.max_async_workers} workers")
+            logger.info(f"Async executor initialized with {self.max_async_workers} workers")
         except Exception as e:
-            logger.error(f"Failed to setup async: {e}")
+            logger.error(f"Failed to setup async executor: {e}")
 
     async def convert_clipboard_content_async(self,
                                              clipboard_content: Optional[str] = None,
@@ -172,7 +162,10 @@ class AdvancedClipboardToEpubConverter:
 
             # Check cache
             if self.cache:
-                cache_key = {'style': self.default_style, 'chapter_words': self.chapter_words}
+                cache_key = {
+                    'css_template': self.default_style,
+                    'words_per_chapter': self.chapter_words,
+                }
                 cached_result = self.cache.get(content, cache_key)
                 if cached_result:
                     logger.info("Using cached conversion result")
@@ -191,16 +184,14 @@ class AdvancedClipboardToEpubConverter:
 
             # Process content
             options = {
-                'chapter_words': self.chapter_words,
-                'style': self.default_style
+                'words_per_chapter': self.chapter_words,
+                'css_template': self.default_style,
             }
 
             # Process in thread pool to avoid blocking
-            processed_data = await self.loop.run_in_executor(
-                self.executor,
-                process_clipboard_content,
-                content,
-                options
+            loop = asyncio.get_running_loop()
+            processed_data = await loop.run_in_executor(
+                self.executor, process_clipboard_content, content, options
             )
 
             # Create ePub
@@ -241,12 +232,13 @@ class AdvancedClipboardToEpubConverter:
         """
         try:
             # Process image in thread pool
-            image_data = await self.loop.run_in_executor(
+            loop = asyncio.get_running_loop()
+            image_data = await loop.run_in_executor(
                 self.executor,
                 self.image_handler.process_image_for_epub,
                 image,
                 None,
-                self.enable_ocr
+                self.enable_ocr,
             )
 
             # Create chapter from image
@@ -288,7 +280,8 @@ class AdvancedClipboardToEpubConverter:
 
     async def get_clipboard_content_async(self) -> str:
         """Get clipboard content asynchronously"""
-        return await self.loop.run_in_executor(None, pyperclip.paste)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, pyperclip.paste)
 
     async def show_edit_window_async(self, content: str, metadata: Dict[str, Any]):
         """
@@ -327,7 +320,8 @@ class AdvancedClipboardToEpubConverter:
         thread.start()
 
         # Wait for window to close
-        await self.loop.run_in_executor(None, event.wait)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, event.wait)
 
         return result['content'], result['metadata'] or {}
 
@@ -360,7 +354,7 @@ class AdvancedClipboardToEpubConverter:
             # Extract components
             chapters = processed_data.get('chapters', [])
             proc_metadata = processed_data.get('metadata', {})
-            css_style = processed_data.get('style', '')
+            css_style = processed_data.get('css', '')
             format_type = processed_data.get('format', 'plain')
 
             if not chapters:
@@ -446,15 +440,12 @@ class AdvancedClipboardToEpubConverter:
             filepath = self.output_dir / filename
 
             # Write ePub asynchronously
-            await self.loop.run_in_executor(
-                self.executor,
-                epub.write_epub,
-                str(filepath),
-                book,
-                {}
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self.executor, epub.write_epub, str(filepath), book, {}
             )
 
-            logger.info(f"✅ ePub created: {filename}")
+            logger.info(f"ePub created: {filename}")
             logger.info(f"   Format: {format_type}")
             logger.info(f"   Chapters: {len(chapters)}")
             logger.info(f"   Size: {filepath.stat().st_size / 1024:.2f} KB")
@@ -476,51 +467,37 @@ class AdvancedClipboardToEpubConverter:
             Path to created ePub or None
         """
         try:
-            # Check if we're already in an async context
+            # If an event loop is already running in this thread, run in a worker thread
+            running_loop = None
             try:
-                loop = asyncio.get_running_loop()
-                # We're already in an async context, can't use run_coroutine_threadsafe
-                logger.warning("Already in async context, falling back to sync processing")
-                # Fall back to synchronous processing
-                return None
+                running_loop = asyncio.get_running_loop()
             except RuntimeError:
-                # No running loop, we can create one
-                pass
+                running_loop = None
 
-            # Run async conversion in event loop
-            if not self.loop or not self.loop.is_running():
-                # Create a new event loop in a thread
-                import threading
-                result = {'filepath': None}
-                exception = {'error': None}
+            if running_loop is not None:
+                result: Dict[str, Optional[str]] = {"filepath": None}
+                exc: Dict[str, Optional[BaseException]] = {"error": None}
 
-                def run_async():
+                def _runner():
                     try:
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        filepath = new_loop.run_until_complete(
+                        result["filepath"] = asyncio.run(
                             self.convert_clipboard_content_async(use_accumulator=use_accumulator)
                         )
-                        result['filepath'] = filepath
-                    except Exception as e:
-                        exception['error'] = e
-                    finally:
-                        new_loop.close()
+                    except BaseException as e:  # capture BaseException to propagate KeyboardInterrupt, etc.
+                        exc["error"] = e
 
-                thread = threading.Thread(target=run_async)
-                thread.start()
-                thread.join(timeout=30)  # 30 second timeout
+                t = threading.Thread(target=_runner, daemon=True)
+                t.start()
+                t.join(timeout=30)
+                if t.is_alive():
+                    logger.error("Conversion timed out after 30 seconds")
+                    return None
+                if exc["error"] is not None:
+                    raise exc["error"]
+                return result["filepath"]
 
-                if exception['error']:
-                    raise exception['error']
-                return result['filepath']
-            else:
-                # Use existing loop
-                future = asyncio.run_coroutine_threadsafe(
-                    self.convert_clipboard_content_async(use_accumulator=use_accumulator),
-                    self.loop
-                )
-                return future.result(timeout=30)  # 30 second timeout
+            # No loop running: safe to use asyncio.run directly
+            return asyncio.run(self.convert_clipboard_content_async(use_accumulator=use_accumulator))
 
         except Exception as e:
             logger.error(f"Error in sync conversion: {e}")
@@ -553,15 +530,15 @@ class AdvancedClipboardToEpubConverter:
         self.current_keys.add(key)
 
         # Check for hotkey combinations
-        if self.current_keys == DEFAULT_HOTKEY:
+        if DEFAULT_HOTKEY.issubset(self.current_keys):
             logger.info("Convert hotkey triggered!")
             self.trigger_conversion()
 
-        elif self.current_keys == DEFAULT_ACCUMULATE_HOTKEY:
+        elif DEFAULT_ACCUMULATE_HOTKEY.issubset(self.current_keys):
             logger.info("Accumulate hotkey triggered!")
             self.trigger_accumulate()
 
-        elif self.current_keys == DEFAULT_COMBINE_HOTKEY:
+        elif DEFAULT_COMBINE_HOTKEY.issubset(self.current_keys):
             logger.info("Combine hotkey triggered!")
             self.trigger_combine()
 
@@ -634,8 +611,6 @@ class AdvancedClipboardToEpubConverter:
             self.stop_listening()
             if self.executor:
                 self.executor.shutdown(wait=False)
-            if self.loop:
-                self.loop.close()
             if self.cache:
                 self.cache.cleanup_if_needed()
             logger.info("Cleanup completed")
@@ -646,7 +621,7 @@ class AdvancedClipboardToEpubConverter:
 def main():
     """Main entry point for Phase 4 converter"""
     print("=" * 60)
-    print("📋 Clipboard to ePub Converter - Phase 4 Advanced Version")
+    print("Clipboard to ePub Converter - Phase 4 Advanced Version")
     print("=" * 60)
 
     # Create converter with all features enabled
@@ -660,10 +635,10 @@ def main():
 
     # Set up callbacks
     def on_conversion_success(filepath):
-        print(f"\n✅ ePub created: {filepath}")
+        print(f"\n[SUCCESS] ePub created: {filepath}")
 
     def on_conversion_error(error):
-        print(f"\n❌ Conversion error: {error}")
+        print(f"\n[ERROR] Conversion error: {error}")
 
     converter.conversion_callback = on_conversion_success
     converter.error_callback = on_conversion_error
@@ -672,10 +647,10 @@ def main():
     converter.start_listening()
 
     print("\nHotkeys:")
-    print("  📝 Cmd+Shift+E - Convert clipboard to ePub")
-    print("  ➕ Cmd+Shift+A - Add clipboard to accumulator")
-    print("  📚 Cmd+Shift+C - Combine accumulated clips to ePub")
-    print("  🛑 ESC - Stop listening")
+    print("  - Cmd+Shift+E - Convert clipboard to ePub")
+    print("  - Cmd+Shift+A - Add clipboard to accumulator")
+    print("  - Cmd+Shift+C - Combine accumulated clips to ePub")
+    print("  - ESC - Stop listening")
     print("\nListening for hotkeys...")
 
     try:

@@ -165,7 +165,9 @@ class ConversionHistory:
                     entry_date = datetime.fromisoformat(entry['timestamp'])
                     if entry_date > cutoff:
                         new_history.append(entry)
-                except:
+                except (ValueError, KeyError) as e:
+                    # Keep entries with invalid timestamps
+                    logger.warning(f"Invalid timestamp in entry, keeping it: {e}")
                     new_history.append(entry)
 
             self.history = new_history
@@ -331,7 +333,7 @@ class ConversionCache:
             max_size_mb: Maximum cache size in MB
         """
         if cache_dir is None:
-            cache_dir = Path.home() / '.clipboard_to_epub' / 'cache'
+            cache_dir = paths.get_cache_dir()
 
         self.cache_dir = cache_dir
         self.max_size_bytes = max_size_mb * 1024 * 1024
@@ -409,8 +411,10 @@ class ConversionCache:
                         self.cache_index[cache_key]['last_accessed'] = datetime.now().isoformat()
                         self.save_index()
                         return data
-                    except Exception as e:
-                        logger.error(f"Error reading cache: {e}")
+                    except (json.JSONDecodeError, OSError, IOError) as e:
+                        logger.error(f"Error reading cache file {cache_file}: {e}")
+                        # Remove corrupted cache entry
+                        self.cache_index.pop(cache_key, None)
 
         return None
 
@@ -471,8 +475,8 @@ class ConversionCache:
                     total_size -= entry['size']
                     del self.cache_index[cache_key]
                     logger.debug(f"Removed cache entry {cache_key}")
-                except:
-                    pass
+                except (OSError, IOError) as e:
+                    logger.warning(f"Could not remove cache file {cache_key}: {e}")
 
             self.save_index()
 
@@ -483,8 +487,8 @@ class ConversionCache:
                 cache_file = self.cache_dir / f"{cache_key}.json"
                 try:
                     cache_file.unlink()
-                except:
-                    pass
+                except (OSError, IOError) as e:
+                    logger.warning(f"Could not remove cache file {cache_key}: {e}")
 
             self.cache_index.clear()
             self.save_index()

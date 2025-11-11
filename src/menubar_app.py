@@ -11,7 +11,8 @@ except ImportError:
     try:
         import imp_patch
     except ImportError:
-        pass  # If patch not available, continue anyway
+        # Patch not available - this is acceptable as it's for Python 3.12+ compatibility
+        pass
 
 import rumps
 import os
@@ -37,7 +38,8 @@ class ClipToEpubApp(rumps.App):
         # Prefer app icon over emoji to look more native
         try:
             icon_path = (Path(__file__).resolve().parent.parent / "resources" / "icon.png")
-        except Exception:
+        except (OSError, RuntimeError) as e:
+            print(f"Warning: Could not resolve icon path: {e}")
             icon_path = None
 
         super(ClipToEpubApp, self).__init__(
@@ -51,8 +53,9 @@ class ClipToEpubApp(rumps.App):
         # Also triggers Windows legacy migrations if applicable
         try:
             paths.migrate_legacy_paths()
-        except Exception:
-            pass
+        except (OSError, IOError) as e:
+            print(f"Warning: Could not migrate legacy paths: {e}")
+            # Non-critical error - continue with defaults
         self.config_path = paths.get_config_path()
 
         # Default configuration
@@ -124,21 +127,21 @@ class ClipToEpubApp(rumps.App):
         """Setup menu items"""
         # Convert now button
         self.menu = [
-            rumps.MenuItem("✨ Convert Now", callback=self.convert_now),
+            rumps.MenuItem("Convert Now", callback=self.convert_now),
             None,  # Separator
-            rumps.MenuItem("📁 Open ePubs Folder", callback=self.open_folder),
-            rumps.MenuItem("📂 Recent Conversions", callback=None),
+            rumps.MenuItem("Open ePubs Folder", callback=self.open_folder),
+            rumps.MenuItem("Recent Conversions", callback=None),
             None,  # Separator
             # Quick toggles
-            rumps.MenuItem("✅ Auto-open after creation", callback=self.toggle_auto_open),
-            rumps.MenuItem("🔔 Show notifications", callback=self.toggle_notifications),
+            rumps.MenuItem("Auto-open after creation", callback=self.toggle_auto_open),
+            rumps.MenuItem("Show notifications", callback=self.toggle_notifications),
             None,  # Separator
-            rumps.MenuItem("⚙️  Settings...", callback=self.show_settings),
-            rumps.MenuItem("🧩 Reveal Config File", callback=self.reveal_config_file),
-            rumps.MenuItem("ℹ️  About", callback=self.show_about),
+            rumps.MenuItem("Settings...", callback=self.show_settings),
+            rumps.MenuItem("Reveal Config File", callback=self.reveal_config_file),
+            rumps.MenuItem("About", callback=self.show_about),
             None,  # Separator
-            rumps.MenuItem("🔄 Restart Converter", callback=self.restart_converter),
-            rumps.MenuItem("🚪 Quit", callback=self.quit_app),
+            rumps.MenuItem("Restart Converter", callback=self.restart_converter),
+            rumps.MenuItem("Quit", callback=self.quit_app),
         ]
 
         # Add recent conversions submenu
@@ -146,16 +149,24 @@ class ClipToEpubApp(rumps.App):
 
         # Initialize toggle states to reflect config
         try:
-            self.menu["✅ Auto-open after creation"].state = int(bool(self.config.get("auto_open", False)))
-            self.menu["🔔 Show notifications"].state = int(bool(self.config.get("show_notifications", True)))
-        except Exception:
-            pass
+            self.menu["Auto-open after creation"].state = int(bool(self.config.get("auto_open", False)))
+            self.menu["Show notifications"].state = int(bool(self.config.get("show_notifications", True)))
+        except (KeyError, AttributeError) as e:
+            print(f"Warning: Could not set menu item states: {e}")
+            # Menu items may not exist in all configurations
 
     def update_recent_menu(self):
         """Update the recent conversions menu"""
-        recent_menu = self.menu["📂 Recent Conversions"]
+        recent_menu = self.menu["Recent Conversions"]
         if recent_menu:
-            recent_menu.clear()
+            # Clear submenu robustly across rumps versions
+            try:
+                recent_menu.clear()
+            except Exception:
+                try:
+                    recent_menu.menu = []  # reset submenu
+                except Exception:
+                    pass
 
             # Get recent ePub files
             output_dir = Path(self.config["output_directory"])
@@ -238,9 +249,9 @@ class ClipToEpubApp(rumps.App):
             self.save_config()
             # Reflect state in checkmark
             try:
-                self.menu["✅ Auto-open after creation"].state = int(new_state)
-            except Exception:
-                pass
+                self.menu["Auto-open after creation"].state = int(new_state)
+            except (KeyError, AttributeError) as e:
+                print(f"Warning: Could not update menu state: {e}")
             self.notify("Preference Updated", f"Auto-open is {'On' if new_state else 'Off'}")
         except Exception as e:
             self.notify("Error", f"Failed to update preference: {e}")
@@ -252,9 +263,9 @@ class ClipToEpubApp(rumps.App):
             self.config["show_notifications"] = new_state
             self.save_config()
             try:
-                self.menu["🔔 Show notifications"].state = int(new_state)
-            except Exception:
-                pass
+                self.menu["Show notifications"].state = int(new_state)
+            except (KeyError, AttributeError) as e:
+                print(f"Warning: Could not update menu state: {e}")
             # Avoid spamming a notification if just turned off
             if new_state:
                 self.notify("Preference Updated", "Notifications are On")
@@ -368,8 +379,9 @@ class ClipToEpubApp(rumps.App):
         try:
             if self.converter:
                 self.converter.stop_listening()
-        except:
-            pass
+        except Exception as e:
+            print(f"Warning: Error stopping converter on quit: {e}")
+            # Continue with quit even if converter cleanup fails
         rumps.quit_application()
 
     def notify(self, title, message):

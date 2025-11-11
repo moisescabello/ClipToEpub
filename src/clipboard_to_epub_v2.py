@@ -228,7 +228,7 @@ class EnhancedClipboardToEpubConverter:
         Args:
             message: Notification message
         """
-        print(f"\n📚 {message}")
+        print(f"\n[NOTIFY] {message}")
         logger.info(f"Notification: {message}")
 
     def on_press(self, key):
@@ -269,14 +269,14 @@ class EnhancedClipboardToEpubConverter:
         Start the keyboard listener and run the application
         """
         print("=" * 60)
-        print("📋 Clipboard to ePub Converter - Phase 2 Enhanced")
+        print("Clipboard to ePub Converter - Phase 2 Enhanced")
         print("=" * 60)
-        print("✨ NEW FEATURES:")
-        print("  • Automatic format detection (Markdown, HTML, RTF, URLs)")
-        print("  • Smart content conversion")
-        print("  • Chapter splitting for long content")
-        print("  • Table of contents generation")
-        print("  • Professional CSS styling")
+        print("NEW FEATURES:")
+        print("  - Automatic format detection (Markdown, HTML, RTF, URLs)")
+        print("  - Smart content conversion")
+        print("  - Chapter splitting for long content")
+        print("  - Table of contents generation")
+        print("  - Professional CSS styling")
         print("-" * 60)
         print(f"Output directory: {self.output_dir}")
         print(f"Hotkey: Cmd + Shift + E")
@@ -291,7 +291,7 @@ class EnhancedClipboardToEpubConverter:
         ) as listener:
             listener.join()
 
-        print("\nGoodbye! 👋")
+        print("\nGoodbye!")
 
 
 def main():

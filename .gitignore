@@ -33,6 +33,8 @@ dist/
 # Project specific - do not upload to git
 AGENTS.md
 CLAUDE.md
+todo.md
+latest_updates.md
 
 # Application bundles (generated)
 *.app

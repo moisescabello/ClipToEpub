@@ -45,15 +45,16 @@ def load_config() -> dict:
     cfg_path = paths.get_config_path()
     try:
         paths.migrate_legacy_paths()
-    except Exception:
-        pass
+    except (OSError, IOError) as e:
+        print(f"Warning: Could not migrate legacy paths: {e}")
     if cfg_path.exists():
         try:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
             for k, v in DEFAULT_CONFIG.items():
                 data.setdefault(k, v)
             return data
-        except Exception:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            print(f"Warning: Could not load config: {e}")
             return DEFAULT_CONFIG.copy()
     return DEFAULT_CONFIG.copy()
 
@@ -63,8 +64,8 @@ def save_config(cfg: dict) -> None:
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except (OSError, IOError, PermissionError) as e:
+        print(f"Error: Could not save config: {e}")
 
 
 def parse_hotkey_string(text: Optional[str]):
@@ -98,7 +99,8 @@ class WindowsTrayApp:
             icon_path = Path(__file__).resolve().parent.parent / "resources" / "icon.png"
             if icon_path.exists():
                 self.tray.setIcon(QIcon(str(icon_path)))
-        except Exception:
+        except (OSError, RuntimeError) as e:
+            # Icon loading failed - not critical
             pass
 
         self.menu = QMenu()
@@ -142,8 +144,8 @@ class WindowsTrayApp:
                 if filepath and self.config.get("auto_open", False):
                     try:
                         os.startfile(filepath)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
+                    except (OSError, AttributeError) as e:
+                        print(f"Warning: Could not open file: {e}")
                 # Force a recent menu refresh soon
                 QTimer.singleShot(250, self._refresh_recent_menu)
 
@@ -170,44 +172,44 @@ class WindowsTrayApp:
         self.menu.clear()
 
         # Convert now
-        action_convert = QAction("✨ Convert Now", self.menu)
+        action_convert = QAction("Convert Now", self.menu)
         action_convert.triggered.connect(self._convert_now)
         self.menu.addAction(action_convert)
 
         self.menu.addSeparator()
 
         # Open output folder
-        action_open_folder = QAction("📁 Open ePubs Folder", self.menu)
+        action_open_folder = QAction("Open ePubs Folder", self.menu)
         action_open_folder.triggered.connect(self._open_folder)
         self.menu.addAction(action_open_folder)
 
         # Recent submenu
-        self.recent_menu = self.menu.addMenu("📂 Recent Conversions")
+        self.recent_menu = self.menu.addMenu("Recent Conversions")
         self._populate_recent_menu()
 
         self.menu.addSeparator()
 
         # Toggles
-        self.action_auto_open = QAction("✅ Auto-open after creation", self.menu)
+        self.action_auto_open = QAction("Auto-open after creation", self.menu)
         self.action_auto_open.setCheckable(True)
         self.action_auto_open.setChecked(bool(self.config.get("auto_open", False)))
         self.action_auto_open.triggered.connect(self._toggle_auto_open)
         self.menu.addAction(self.action_auto_open)
 
-        self.action_notifications = QAction("🔔 Show notifications", self.menu)
+        self.action_notifications = QAction("Show notifications", self.menu)
         self.action_notifications.setCheckable(True)
         self.action_notifications.setChecked(bool(self.config.get("show_notifications", True)))
         self.action_notifications.triggered.connect(self._toggle_notifications)
         self.menu.addAction(self.action_notifications)
 
         # Settings
-        action_settings = QAction("⚙️ Settings…", self.menu)
+        action_settings = QAction("Settings…", self.menu)
         action_settings.triggered.connect(self._open_settings)
         self.menu.addAction(action_settings)
 
         # Quit
         self.menu.addSeparator()
-        action_quit = QAction("🚪 Quit", self.menu)
+        action_quit = QAction("Quit", self.menu)
         action_quit.triggered.connect(self._quit)
         self.menu.addAction(action_quit)
 
@@ -245,8 +247,8 @@ class WindowsTrayApp:
             if path and self.config.get("auto_open", False):
                 try:
                     os.startfile(path)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                except (OSError, AttributeError) as e:
+                    print(f"Warning: Could not open file: {e}")
         except Exception as e:
             self.tray.showMessage("Error", f"Conversion failed: {e}")
 
@@ -255,15 +257,15 @@ class WindowsTrayApp:
         try:
             os.makedirs(folder, exist_ok=True)
             os.startfile(folder)  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        except (OSError, AttributeError) as e:
+            print(f"Warning: Could not open folder: {e}")
 
     def _open_file(self, file_path: str):
         try:
             if os.path.exists(file_path):
                 os.startfile(file_path)  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        except (OSError, AttributeError) as e:
+            print(f"Warning: Could not open file: {e}")
 
     def _toggle_auto_open(self):
         self.config["auto_open"] = not bool(self.config.get("auto_open", False))
@@ -308,8 +310,8 @@ class WindowsTrayApp:
         try:
             if self.converter:
                 self.converter.stop_listening()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Error stopping converter on quit: {e}")
         QApplication.quit()
 
 

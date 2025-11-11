@@ -23,7 +23,8 @@ def load_config(defaults: dict) -> dict:
             for k, v in defaults.items():
                 data.setdefault(k, v)
             return data
-        except Exception:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            print(f"Warning: Could not load config from {path}: {e}")
             return defaults.copy()
     return defaults.copy()
 
@@ -34,7 +35,8 @@ def save_config(config: dict) -> bool:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         return True
-    except Exception:
+    except (OSError, IOError, PermissionError) as e:
+        print(f"Error: Could not save config to {path}: {e}")
         return False
 
 
@@ -65,7 +67,9 @@ try:
         QWidget,
     )
     HAVE_QT = True
-except Exception:
+except ImportError as e:
+    # PySide6 not installed - will fall back to Tkinter
+    print(f"PySide6 not available: {e}")
     HAVE_QT = False
 
 
@@ -88,8 +92,9 @@ def list_available_styles() -> list[str]:
         if templates_dir.exists():
             for p in templates_dir.glob("*.css"):
                 styles.add(p.stem)
-    except Exception:
-        pass
+    except (OSError, RuntimeError) as e:
+        print(f"Warning: Could not scan templates directory: {e}")
+        # Return default styles only
     return sorted(styles)
 
 
@@ -107,8 +112,9 @@ if HAVE_QT:
                 icon_path = Path(__file__).resolve().parent.parent / "resources" / "icon.png"
                 if icon_path.exists():
                     self.setWindowIcon(QIcon(str(icon_path)))
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as e:
+                # Icon loading failed - not critical
+                print(f"Warning: Could not load window icon: {e}")
 
             # Main layout with tabs inside a scroll area per tab if needed
             layout = QVBoxLayout(self)
@@ -253,7 +259,7 @@ def run_qt_dialog():
         return 0
     else:
         # Fallback to Tkinter settings window
-        from . import config_window as tk_settings  # type: ignore
+        import config_window as tk_settings  # type: ignore
 
         tk_settings.main()
         return 0

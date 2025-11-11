@@ -69,7 +69,9 @@ class ContentDetector:
         try:
             result = urlparse(text)
             return all([result.scheme in ('http', 'https'), result.netloc])
-        except:
+        except (ValueError, AttributeError) as e:
+            # Invalid URL format
+            logger.debug(f"Invalid URL format: {e}")
             return False
 
     @staticmethod

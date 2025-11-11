@@ -64,9 +64,9 @@ python src\tray_app_windows.py
 
 ## Configuration & Paths
 
-- macOS config: `~/Library/Preferences/cliptoepub.json`
+- macOS config: `~/Library/Preferences/clipboard-to-epub.json`
 - Windows config: `%APPDATA%\ClipToEpub\config.json` (auto-migration from legacy paths)
-- History (if enabled): `~/.cliptoepub/history.json` (macOS) or `%APPDATA%\ClipToEpub\history.json` (Windows)
+- History (if enabled): `~/.clipboard_to_epub/history.json` (macOS) or `%APPDATA%\ClipToEpub\history.json` (Windows)
 - Output directory (default): `~/Documents/ClipToEpubs/` or `C:\Users\<you>\Documents\ClipToEpubs\`
 
 Note: Hotkey is fixed by platform (Cmd+Shift+E on macOS, Ctrl+Shift+E on Windows). Future versions may add a UI to customize it.

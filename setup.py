@@ -101,7 +101,7 @@ OPTIONS = {
         'src.config_window',
         'src.edit_window',
         'src.history_manager',
-        'src.content_detector',
+        'content_processor',
         'src.image_handler',
         'src.update_checker',
     ],

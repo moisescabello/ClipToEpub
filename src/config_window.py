@@ -110,7 +110,8 @@ class ConfigWindow:
             icon_png = (Path(__file__).resolve().parent.parent / "resources" / "icon_64.png")
             if icon_png.exists():
                 self.root.iconphoto(True, tk.PhotoImage(file=str(icon_png)))
-        except Exception:
+        except (tk.TclError, OSError) as e:
+            # Icon loading failed - not critical
             pass
 
         # Configure style
@@ -118,10 +119,10 @@ class ConfigWindow:
         try:
             # Prefer native macOS look if available
             style.theme_use('aqua')
-        except Exception:
+        except tk.TclError:
             try:
                 style.theme_use('clam')
-            except Exception:
+            except tk.TclError:
                 style.theme_use('default')
 
         # Create a scrollable content area to avoid clipping on small screens
@@ -192,7 +193,8 @@ class ConfigWindow:
                 found = [p.stem for p in templates_dir.glob("*.css")]
                 if found:
                     styles = sorted(list({*styles, *found}))
-        except Exception:
+        except (OSError, RuntimeError) as e:
+            # Template directory not accessible - use defaults
             pass
         style_combo = ttk.Combobox(
             main_frame,

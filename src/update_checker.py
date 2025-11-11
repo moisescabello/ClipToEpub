@@ -80,7 +80,8 @@ class UpdateChecker:
             last_check_time = datetime.fromisoformat(last_check)
             time_since_check = datetime.now() - last_check_time
             return time_since_check > timedelta(hours=self.CHECK_INTERVAL_HOURS)
-        except:
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Invalid last_check timestamp: {e}")
             return True
 
     def parse_version(self, version_string: str) -> tuple:
@@ -97,7 +98,8 @@ class UpdateChecker:
         parts = version.split('.')
         try:
             return tuple(int(p) for p in parts[:3])
-        except:
+        except (ValueError, IndexError, AttributeError) as e:
+            logger.debug(f"Invalid version string '{version_string}': {e}")
             return (0, 0, 0)
 
     def check_for_updates(self, force: bool = False) -> Optional[Dict]:
@@ -293,7 +295,7 @@ class UpdateChecker:
         latest = update_info.get('latest_version', 'unknown')
 
         message = f"""
-📋 Clipboard to ePub Update Available!
+Clipboard to ePub Update Available!
 
 Current version: {current}
 New version: {latest}
@@ -376,7 +378,7 @@ def main():
                 print("Opening releases page...")
                 checker.open_download_page()
     else:
-        print("\n✅ You're running the latest version!")
+        print("\n[OK] You're running the latest version!")
 
     print("\nUpdate check complete.")
 

@@ -37,8 +37,9 @@ def _default_hotkey():
             return {keyboard.Key.ctrl, keyboard.Key.shift, keyboard.KeyCode.from_char('e')}
         else:
             return {keyboard.Key.cmd, keyboard.Key.shift, keyboard.KeyCode.from_char('e')}
-    except Exception:
-        # Fallback to Cmd+Shift+E if pynput not fully available
+    except (AttributeError, KeyError) as e:
+        # Fallback if pynput keys are not available on this platform
+        logger.warning(f"Could not set platform-specific hotkey: {e}")
         return {keyboard.Key.shift, keyboard.KeyCode.from_char('e')}
 
 DEFAULT_HOTKEY = _default_hotkey()
@@ -103,8 +104,8 @@ class ClipboardToEpubConverter:
 
             # Process content with intelligent detection
             options = {
-                'chapter_words': self.chapter_words,
-                'style': self.default_style
+                'words_per_chapter': self.chapter_words,
+                'css_template': self.default_style,
             }
             processed_data = process_clipboard_content(
                 clipboard_content,
@@ -114,7 +115,7 @@ class ClipboardToEpubConverter:
             # Extract processed components
             chapters = processed_data.get('chapters', [])
             metadata = processed_data.get('metadata', {})
-            css_style = processed_data.get('style', '')
+            css_style = processed_data.get('css', '')
             format_type = processed_data.get('format', 'plain')
 
             if not chapters:
@@ -216,7 +217,7 @@ class ClipboardToEpubConverter:
             # Write ePub file
             epub.write_epub(str(filepath), book, {})
 
-            logger.info(f"✅ ePub created successfully: {filename}")
+            logger.info(f"ePub created successfully: {filename}")
             logger.info(f"   Format detected: {format_type}")
             logger.info(f"   Chapters: {len(chapters)}")
             logger.info(f"   Style: {self.default_style}")
@@ -225,7 +226,7 @@ class ClipboardToEpubConverter:
             return str(filepath)
 
         except Exception as e:
-            logger.error(f"❌ Error creating ePub: {e}", exc_info=True)
+            logger.error(f"Error creating ePub: {e}", exc_info=True)
             return None
 
     def on_press(self, key):
@@ -238,7 +239,7 @@ class ClipboardToEpubConverter:
         self.current_keys.add(key)
 
         # Check if hotkey combination is pressed
-        if self.current_keys == self.hotkey_combo:
+        if self.hotkey_combo.issubset(self.current_keys):
             logger.info("Hotkey triggered!")
 
             # Run conversion in separate thread to avoid blocking
@@ -296,15 +297,15 @@ class ClipboardToEpubConverter:
         Run in CLI mode (for backward compatibility)
         """
         print("=" * 60)
-        print("📋 Clipboard to ePub Converter - Phase 3")
+        print("Clipboard to ePub Converter - Phase 3")
         print("=" * 60)
-        print("✨ FEATURES:")
-        print("  • Menu bar application")
-        print("  • Automatic format detection")
-        print("  • Smart content conversion")
-        print("  • Chapter splitting")
-        print("  • Table of contents")
-        print("  • Professional CSS styling")
+        print("FEATURES:")
+        print("  - Menu bar application")
+        print("  - Automatic format detection")
+        print("  - Smart content conversion")
+        print("  - Chapter splitting")
+        print("  - Table of contents")
+        print("  - Professional CSS styling")
         print("-" * 60)
         print(f"Output directory: {self.output_dir}")
         hotkey_label = "Ctrl + Shift + E" if sys.platform.startswith('win') or sys.platform.startswith('linux') else "Cmd + Shift + E"
@@ -316,16 +317,16 @@ class ClipboardToEpubConverter:
         # Set CLI callback
         def cli_callback(filepath):
             if filepath:
-                print(f"\n✅ ePub created: {os.path.basename(filepath)}")
+                print(f"\n[SUCCESS] ePub created: {os.path.basename(filepath)}")
             else:
-                print("\n❌ Failed to create ePub")
+                print("\n[ERROR] Failed to create ePub")
 
         self.conversion_callback = cli_callback
 
         # Start listening
         self.start_listening()
 
-        print("\nGoodbye! 👋")
+        print("\nGoodbye!")
 
 
 def main():
@@ -344,7 +345,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\nInterrupted by user. Exiting...")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] {e}")
         logging.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
 

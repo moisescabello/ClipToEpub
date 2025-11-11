@@ -54,16 +54,17 @@ class PreConversionEditor:
             style = ttk.Style()
             try:
                 style.theme_use('aqua')
-            except Exception:
+            except tk.TclError:
                 try:
                     style.theme_use('clam')
-                except Exception:
+                except tk.TclError:
+                    # Use default theme
                     pass
             icon_png = (Path(__file__).resolve().parent.parent / "resources" / "icon_64.png")
             if icon_png.exists():
                 self.window.iconphoto(True, tk.PhotoImage(file=str(icon_png)))
-        except Exception:
-            pass
+        except (tk.TclError, OSError) as e:
+            logger.debug(f"Could not set theme or icon: {e}")
 
         self.setup_ui()
         self.load_content()
@@ -354,7 +355,8 @@ class PreConversionEditor:
             css_path = templates_dir / f"{style_name}.css"
             if css_path.exists():
                 css_snippet = css_path.read_text(encoding='utf-8')
-        except Exception:
+        except (OSError, UnicodeDecodeError, AttributeError) as e:
+            logger.debug(f"Could not load CSS template: {e}")
             css_snippet = None
 
         # Basic HTML template
@@ -452,8 +454,8 @@ class PreConversionEditor:
         if self.preview_file and Path(self.preview_file.name).exists():
             try:
                 Path(self.preview_file.name).unlink()
-            except:
-                pass
+            except (OSError, IOError) as e:
+                logger.warning(f"Could not delete preview file: {e}")
 
         # Call callback if provided
         if self.on_convert:
@@ -467,8 +469,8 @@ class PreConversionEditor:
         if self.preview_file and Path(self.preview_file.name).exists():
             try:
                 Path(self.preview_file.name).unlink()
-            except:
-                pass
+            except (OSError, IOError) as e:
+                logger.warning(f"Could not delete preview file: {e}")
 
         if self.on_cancel:
             self.on_cancel()
