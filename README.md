@@ -1,10 +1,11 @@
 # ClipToEpub
 
-Convert clipboard content to ePub and save it in a custom folder with a single global hotkey. Runs as a macOS menu bar app and a Windows system tray app.
+One step: Press a single global hotkey and it automatically converts the clipboard content to ePub and saves it to the designated folder. Detects images, rich text formatting, and markdown.
 
-![image](https://github.com/user-attachments/assets/9e70c1fa-d2f4-4f0c-b1b2-fd9f78cb8cdc)
+<img src="https://github.com/user-attachments/assets/9e70c1fa-d2f4-4f0c-b1b2-fd9f78cb8cdc" width="200"/>   
+<br>
+<img src="https://github.com/user-attachments/assets/e08a04c8-e349-4bda-882a-683494ea5d11" width="600"/>
 
-![image](https://github.com/user-attachments/assets/e08a04c8-e349-4bda-882a-683494ea5d11)
 
 
 ## Prerequisites
