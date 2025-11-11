@@ -1,14 +1,14 @@
-# 📋 ClipToEpub
+# ClipToEpub
 
 Convert clipboard content to ePub with a single global hotkey. Runs as a macOS menu bar app and a Windows system tray app.
 
-## 📋 Prerequisites
+## Prerequisites
 
 - macOS 10.15 or later
 - Python 3.9 or later
 - pip (Python package manager)
 
-## 🔧 Installation
+## Installation
 
 ### Option 1: Automatic Installation (Recommended)
 
@@ -35,7 +35,7 @@ pip install -r requirements.txt
    - Go to System Settings → Privacy & Security → Accessibility
    - Add Terminal (or your Python interpreter) to the allowed apps
 
-## 🎯 Usage
+## Usage
 
 ### macOS (Menu Bar)
 
@@ -62,7 +62,7 @@ python src\tray_app_windows.py
 - Output: `C:\Users\<you>\Documents\ClipToEpubs\`
 - Click the tray icon for menu: Convert Now, Recent, Settings, toggles
 
-## ⚙️ Configuration & Paths
+## Configuration & Paths
 
 - macOS config: `~/Library/Preferences/cliptoepub.json`
 - Windows config: `%APPDATA%\ClipToEpub\config.json` (auto-migration from legacy paths)
@@ -71,7 +71,7 @@ python src\tray_app_windows.py
 
 Note: Hotkey is fixed by platform (Cmd+Shift+E on macOS, Ctrl+Shift+E on Windows). Future versions may add a UI to customize it.
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 ClipToEpub/
@@ -104,26 +104,26 @@ ClipToEpub/
 └── README.md                    # This file
 ```
 
-## ⌨️ Keyboard Shortcuts
+## Keyboard Shortcuts
 
 - macOS: Cmd + Shift + E
 - Windows: Ctrl + Shift + E
 
-## 🔍 Features
+## Features
 
 ### Current
-- ✅ Global hotkey capture (platform-specific)
-- ✅ Smart content detection (Markdown, HTML, RTF, URLs)
-- ✅ Chapter splitting and Table of Contents
-- ✅ CSS styling (default, minimal, modern)
-- ✅ Recent conversions menu and notifications
-- ✅ Settings window (Qt preferred; Tk fallback)
-- ✅ Windows tray app (QSystemTrayIcon)
+- Global hotkey capture (platform-specific)
+- Smart content detection (Markdown, HTML, RTF, URLs)
+- Chapter splitting and Table of Contents
+- CSS styling (default, minimal, modern)
+- Recent conversions menu and notifications
+- Settings window (Qt preferred; Tk fallback)
+- Windows tray app (QSystemTrayIcon)
 
 ### Optional / Advanced
-- 🔄 Phase 4 modules for images/OCR and URL enhancements (`src/clipboard_to_epub_v4.py`)
+- Phase 4 modules for images/OCR and URL enhancements (`src/clipboard_to_epub_v4.py`)
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### "Permission denied" error
 - Ensure Terminal has accessibility permissions in System Preferences
@@ -148,22 +148,22 @@ ClipToEpub/
 ### Tray icon not visible (Windows)
 - Check the hidden icons chevron and ensure the app is running.
 
-## 📊 System Requirements
+## System Requirements
 
 - **OS:** macOS 10.15+
 - **Python:** 3.9+
 - **RAM:** 50MB
 - **Disk Space:** 10MB + space for ePub files
 
-## 🤝 Contributing
+## Contributing
 
 This project is in active development.
 
-## 📝 License
+## License
 
 MIT License - Feel free to use and modify as needed.
 
-## 🆘 Support
+## Support
 
 For issues or questions:
 - Check the troubleshooting section above
