@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-import paths
+# Robust import for paths whether run from repo root or src/
+try:
+    from src import paths as paths  # type: ignore
+except Exception:
+    import paths  # type: ignore
 
 
 def load_config(defaults: dict) -> dict:

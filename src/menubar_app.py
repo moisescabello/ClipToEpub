@@ -28,7 +28,11 @@ import pync
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.converter import ClipboardToEpubConverter
-import paths
+# Robust import for paths module whether run from repo root or src/
+try:
+    from src import paths as paths  # type: ignore
+except Exception:
+    import paths  # type: ignore
 
 
 class ClipToEpubApp(rumps.App):

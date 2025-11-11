@@ -32,7 +32,10 @@ except Exception as e:
     HAVE_QT = False
 
 # When executed directly (python src/tray_app_windows.py), src/ is on sys.path
-import paths
+try:
+    from src import paths as paths  # type: ignore
+except Exception:
+    import paths  # type: ignore
 from converter import ClipboardToEpubConverter
 
 

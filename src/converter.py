@@ -252,6 +252,16 @@ class ClipboardToEpubConverter:
     ) -> Optional[str]:
         try:
             # Source content and metadata
+            # Priority: Images → URLs/Markdown/HTML/RTF/Plain (via processor)
+            if not use_accumulator and clipboard_content is None:
+                # Give priority to images currently in the clipboard
+                try:
+                    maybe_image = self.image_handler.detect_image_in_clipboard()
+                except Exception:
+                    maybe_image = None
+                if maybe_image is not None:
+                    logger.info("Image detected in clipboard (priority path)")
+                    return await self._convert_image_to_epub_async(maybe_image)
             if use_accumulator:
                 content = self.accumulator.combine_clips()
                 metadata = self.accumulator.get_combined_metadata()
@@ -263,10 +273,13 @@ class ClipboardToEpubConverter:
                 metadata = {}
 
             if not content or not content.strip():
-                # Try image path
-                image = self.image_handler.detect_image_in_clipboard()
-                if image:
-                    logger.info("Image detected in clipboard")
+                # Fallback: check for image if no textual content
+                try:
+                    image = self.image_handler.detect_image_in_clipboard()
+                except Exception:
+                    image = None
+                if image is not None:
+                    logger.info("Image detected in clipboard (fallback path)")
                     return await self._convert_image_to_epub_async(image)
                 logger.warning("No content to convert")
                 return None

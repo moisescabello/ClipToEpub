@@ -9,7 +9,11 @@ from tkinter import ttk, filedialog, messagebox
 import json
 from pathlib import Path
 import sys
-import paths
+# Robust import for paths whether run from repo root or src/
+try:
+    from src import paths as paths  # type: ignore
+except Exception:
+    import paths  # type: ignore
 
 
 class ConfigWindow:

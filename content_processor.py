@@ -20,12 +20,13 @@ import requests
 from newspaper import Article
 import nltk
 
-# Ensure NLTK punkt tokenizer is available (for sentence splitting)
+# Optional NLTK dependency: avoid network/download at import time.
+# We detect availability and proceed without downloading to keep startup fast.
 try:
     nltk.data.find('tokenizers/punkt')
-except LookupError:
-    print("Downloading NLTK punkt tokenizer...")
-    nltk.download('punkt', quiet=True)
+    HAVE_PUNKT = True
+except Exception:
+    HAVE_PUNKT = False
 
 
 # Module logger
@@ -856,14 +857,33 @@ class CSSTemplates:
 
     def get_template(self, name: str = 'default') -> str:
         """Get a CSS template by name"""
+        # 1) Prefer a CSS file from templates/<name>.css if present
+        try:
+            from pathlib import Path
+            # Try common locations relative to this file
+            here = Path(__file__).resolve()
+            candidates = [
+                here.parent / 'templates' / f'{name}.css',           # repo root layout (content_processor at root)
+                here.parent.parent / 'templates' / f'{name}.css',    # if moved under src/
+            ]
+            for p in candidates:
+                if p.exists() and p.is_file():
+                    try:
+                        return p.read_text(encoding='utf-8')
+                    except Exception:
+                        # Fall back to built-ins if file cannot be read
+                        break
+        except Exception:
+            # Path resolution failed; continue with built-ins
+            pass
+
+        # 2) Built-in templates
         templates = {
             'default': self.get_default_css,
             'minimal': self.get_minimal_css,
-            'modern': self.get_modern_css
+            'modern': self.get_modern_css,
         }
-
-        template_func = templates.get(name, self.get_default_css)
-        return template_func()
+        return templates.get(name, self.get_default_css)()
 
 
 # Main processing function for integration

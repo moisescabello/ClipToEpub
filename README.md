@@ -47,7 +47,7 @@ python src/menubar_app.py
 ```
 
 - Default hotkey: Cmd + Shift + E
-- Output: `~/Documents/ClipToEpubs/`
+- Output: `~/Documents/ClipboardEpubs/`
 - Quick toggles in the menu: Auto-open, Notifications, Recent Conversions, Settings
 
 ### Windows (Tray App)
@@ -59,7 +59,7 @@ python src\tray_app_windows.py
 ```
 
 - Default hotkey: Ctrl + Shift + E
-- Output: `C:\Users\<you>\Documents\ClipToEpubs\`
+- Output: `C:\Users\<you>\Documents\ClipboardEpubs\`
 - Click the tray icon for menu: Convert Now, Recent, Settings, toggles
 
 ## Configuration & Paths
@@ -67,7 +67,7 @@ python src\tray_app_windows.py
 - macOS config: `~/Library/Preferences/clipboard-to-epub.json`
 - Windows config: `%APPDATA%\ClipToEpub\config.json` (auto-migration from legacy paths)
 - History (if enabled): `~/.clipboard_to_epub/history.json` (macOS) or `%APPDATA%\ClipToEpub\history.json` (Windows)
-- Output directory (default): `~/Documents/ClipToEpubs/` or `C:\Users\<you>\Documents\ClipToEpubs\`
+- Output directory (default): `~/Documents/ClipboardEpubs/` or `C:\Users\<you>\Documents\ClipboardEpubs\`
 
 Note: Hotkey is fixed by platform (Cmd+Shift+E on macOS, Ctrl+Shift+E on Windows). Future versions may add a UI to customize it.
 
@@ -116,6 +116,7 @@ ClipToEpub/
 - Smart content detection (Markdown, HTML, RTF, URLs)
 - Chapter splitting and Table of Contents
 - CSS styling (default, minimal, modern)
+- Custom CSS: place additional `.css` files in `templates/` and select by name in Settings
 - Recent conversions menu and notifications
 - Settings window (Qt preferred; Tk fallback)
 - Windows tray app (QSystemTrayIcon)

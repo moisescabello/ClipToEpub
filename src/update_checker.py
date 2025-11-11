@@ -13,7 +13,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Callable
 import webbrowser
-import paths
+# Robust import for paths whether run from repo root or src/
+try:
+    from src import paths as paths  # type: ignore
+except Exception:
+    import paths  # type: ignore
 import tempfile
 
 # Configure logging
