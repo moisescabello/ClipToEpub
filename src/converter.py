@@ -9,6 +9,7 @@ advanced features (images, OCR, URL fetching, accumulator, caching, history).
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import threading
 from datetime import datetime
@@ -103,6 +104,20 @@ class ClipboardToEpubConverter:
         enable_edit_window: bool = False,
         hotkey_combo: Optional[set] = None,
         max_async_workers: int = 3,
+        # YouTube subtitles + LLM
+        youtube_langs: Optional[List[str]] = None,
+        youtube_prefer_native: bool = True,
+        yt_dlp_binary: str = "yt-dlp",
+        # LLM config (optional; used when processing YouTube subs)
+        llm_provider: str = "openrouter",
+        anthropic_api_key: str = "",
+        openrouter_api_key: str = "",
+        anthropic_model: str = "anthropic/claude-sonnet-4.5",
+        anthropic_prompt: str = "",
+        anthropic_max_tokens: int = 2048,
+        anthropic_temperature: float = 0.2,
+        anthropic_timeout_seconds: int = 60,
+        anthropic_retry_count: int = 10,
     ) -> None:
         self.output_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
         self.default_author = default_author
@@ -125,6 +140,33 @@ class ClipboardToEpubConverter:
         self.history = ConversionHistory() if enable_history else None
         self.accumulator = ClipboardAccumulator(max_clips=50)
         self.cache = ConversionCache() if enable_cache else None
+
+        # YouTube + LLM settings
+        self.youtube_langs: List[str] = [
+            *(youtube_langs or ["en", "es", "pt"])
+        ]
+        # sanitize and cap to 3 unique entries
+        langs_norm = []
+        for c in self.youtube_langs:
+            cc = str(c or "").strip().lower()
+            if cc and cc not in langs_norm:
+                langs_norm.append(cc)
+            if len(langs_norm) >= 3:
+                break
+        self.youtube_langs = langs_norm or ["en", "es", "pt"]
+        self.youtube_prefer_native = bool(youtube_prefer_native)
+        self.yt_dlp_binary = yt_dlp_binary or "yt-dlp"
+
+        # LLM config for YouTube flow
+        self.llm_provider = (llm_provider or "openrouter").strip().lower()
+        self.anthropic_api_key = anthropic_api_key or ""
+        self.openrouter_api_key = openrouter_api_key or ""
+        self.anthropic_model = anthropic_model or "anthropic/claude-sonnet-4.5"
+        self.anthropic_prompt = anthropic_prompt or ""
+        self.anthropic_max_tokens = int(anthropic_max_tokens or 2048)
+        self.anthropic_temperature = float(anthropic_temperature or 0.2)
+        self.anthropic_timeout_seconds = int(anthropic_timeout_seconds or 60)
+        self.anthropic_retry_count = int(anthropic_retry_count or 10)
 
         # Listener state
         self.current_keys: set = set()
@@ -191,6 +233,79 @@ class ClipboardToEpubConverter:
             return asyncio.run(self.convert_clipboard_content_async(use_accumulator=use_accumulator))
         except Exception as e:
             logger.error(f"Error in sync conversion: {e}")
+            return None
+
+    def convert_text_to_epub(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None) -> Optional[str]:
+        """Convert provided text directly to ePub, bypassing clipboard detection."""
+        try:
+            try:
+                asyncio.get_running_loop()
+                loop_running = True
+            except RuntimeError:
+                loop_running = False
+
+            if loop_running:
+                result: Dict[str, Optional[str]] = {"path": None}
+                error: Dict[str, Optional[BaseException]] = {"e": None}
+
+                def _runner():
+                    try:
+                        result["path"] = asyncio.run(
+                            self.convert_text_to_epub_async(text, suggested_title=suggested_title, tags=tags)
+                        )
+                    except BaseException as e:  # propagate fatal exceptions
+                        error["e"] = e
+
+                t = threading.Thread(target=_runner, daemon=True)
+                t.start()
+                t.join(timeout=30)
+                if t.is_alive():
+                    logger.error("Conversion timed out after 30 seconds")
+                    return None
+                if error["e"] is not None:
+                    raise error["e"]
+                return result["path"]
+
+            return asyncio.run(self.convert_text_to_epub_async(text, suggested_title=suggested_title, tags=tags))
+        except Exception as e:
+            logger.error(f"Error converting provided text: {e}")
+            return None
+
+    async def convert_text_to_epub_async(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None) -> Optional[str]:
+        try:
+            if not text or not text.strip():
+                logger.warning("No text provided for direct conversion")
+                return None
+
+            # Use the same processing pipeline but bypass clipboard detection
+            loop = asyncio.get_running_loop()
+            options = {"words_per_chapter": self.chapter_words, "css_template": self.default_style}
+            processed = await loop.run_in_executor(self.executor, process_clipboard_content, text, options)
+
+            # Force title if suggested
+            metadata = {"title": suggested_title} if suggested_title else {}
+            if tags:
+                metadata["tags"] = list(tags)
+
+            path = await self._create_epub_async(processed, metadata)
+
+            if self.history and path:
+                try:
+                    hist_meta = {
+                        "title": processed.get("metadata", {}).get("title", suggested_title or "Untitled"),
+                        "format": processed.get("format", "unknown"),
+                        "chapters": len(processed.get("chapters", [])),
+                        "size": Path(path).stat().st_size,
+                        "author": self.default_author,
+                        "tags": list(tags) if tags else [],
+                    }
+                    self.history.add_entry(path, hist_meta)
+                except Exception:
+                    pass
+
+            return path
+        except Exception as e:
+            logger.error(f"Error in direct text conversion: {e}", exc_info=True)
             return None
 
     def start_listening(self) -> None:
@@ -311,6 +426,16 @@ class ClipboardToEpubConverter:
                     logger.info("Using cached conversion result")
                     return await self._create_epub_from_cached_async(cached)
 
+            # Special case: If content is a bare YouTube URL, fetch subtitles and route via LLM
+            try:
+                if not use_accumulator and isinstance(content, str) and self._looks_like_youtube_url(content.strip()):
+                    logger.info("YouTube URL detected; attempting subtitles + LLM pipeline")
+                    path = await self._handle_youtube_url_async(content.strip())
+                    if path:
+                        return path
+            except Exception as e:
+                logger.warning(f"YouTube path failed; falling back to generic processing: {e}")
+
             # Process content (thread pool)
             loop = asyncio.get_running_loop()
             processed = await loop.run_in_executor(self.executor, process_clipboard_content, content, options)
@@ -343,6 +468,246 @@ class ClipboardToEpubConverter:
     async def _get_clipboard_content_async(self) -> str:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, pyperclip.paste)
+
+    # --------- YouTube subtitles + LLM helpers ---------
+    @staticmethod
+    def _looks_like_youtube_url(text: str) -> bool:
+        try:
+            from urllib.parse import urlparse, parse_qs
+            u = urlparse(text.strip())
+            if u.scheme not in {"http", "https"}:
+                return False
+            host = (u.netloc or "").lower()
+            if any(h in host for h in ["youtube.com", "youtu.be"]):
+                # quick sanity: if youtube.com check for /watch or shorts/live; youtu.be path holds id
+                return True
+            return False
+        except Exception:
+            return False
+
+    async def _handle_youtube_url_async(self, url: str) -> Optional[str]:
+        # Download subtitles with language + native/auto preference
+        loop = asyncio.get_running_loop()
+        try:
+            transcript_text = await loop.run_in_executor(self.executor, self._download_youtube_subtitles_blocking, url)
+        except Exception as e:
+            logger.warning(f"yt-dlp invocation error: {e}")
+            transcript_text = None
+
+        if not transcript_text or not transcript_text.strip():
+            logger.info("No subtitles retrieved for YouTube URL")
+            return None
+
+        # If LLM prompt not configured, fall back to direct conversion of transcript
+        if not (self.anthropic_prompt and (self.anthropic_api_key or self.openrouter_api_key)):
+            logger.info("LLM not configured; converting raw subtitles")
+            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"])  # type: ignore[arg-type]
+
+        # Process via LLM
+        try:
+            md = await loop.run_in_executor(
+                self.executor,
+                self._llm_process_blocking,
+                transcript_text,
+            )
+        except Exception as e:
+            logger.error(f"LLM processing failed: {e}")
+            md = None
+
+        if not md or not md.strip():
+            logger.warning("Empty LLM result; converting transcript directly")
+            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"])  # type: ignore[arg-type]
+
+        # Title from first line
+        try:
+            try:
+                from src.llm_anthropic import sanitize_first_line  # type: ignore
+            except Exception:
+                from llm_anthropic import sanitize_first_line  # type: ignore
+            suggested_title = sanitize_first_line(md)
+        except Exception:
+            suggested_title = "LLM Result"
+
+        return await self.convert_text_to_epub_async(md, suggested_title=suggested_title, tags=["anthropic", "youtube"])  # type: ignore[arg-type]
+
+    def _download_youtube_subtitles_blocking(self, url: str) -> Optional[str]:
+        import subprocess
+        import tempfile
+        import time
+        from pathlib import Path as _Path
+
+        tmpdir = tempfile.mkdtemp(prefix="cte_yt_", dir=None)
+        base = _Path(tmpdir)
+        # capture baseline files to identify new ones after yt-dlp run
+        before = {p.name for p in base.glob("*")}
+
+        def run_cmd(args: List[str]) -> bool:
+            try:
+                proc = subprocess.run(args, cwd=str(base), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode == 0:
+                    return True
+                # Some failures still produce files; continue
+                return False
+            except FileNotFoundError:
+                raise RuntimeError("yt-dlp not found. Install it with 'pip install yt-dlp' or via Homebrew.")
+            except Exception as e:
+                logger.debug(f"yt-dlp run error: {e}")
+                return False
+
+        # Helper: locate a newly created subtitle file, prefer vtt then srt
+        def find_new_sub(lang_code: str) -> Optional[_Path]:
+            new_files = [p for p in base.glob("*") if p.name not in before]
+            # Prefer files that include language code in name
+            lang_code_l = f".{lang_code.lower()}."
+            candidates = [p for p in new_files if p.suffix.lower() in (".vtt", ".srt")]
+            # Try to prioritize ones that contain the lang code
+            preferred = [p for p in candidates if lang_code_l in p.name.lower()]
+            pool = preferred or candidates
+            if not pool:
+                return None
+            # choose the most recent
+            pool.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return pool[0]
+
+        # Iterate languages and native/auto preference
+        subs_text: Optional[str] = None
+        # yt-dlp args base
+        common = [
+            self.yt_dlp_binary,
+            "--skip-download",
+            "--no-playlist",
+            "--sub-format",
+            "vtt,srt",
+        ]
+
+        for lang in self.youtube_langs:
+            tried_any = False
+            if self.youtube_prefer_native:
+                # Native first
+                args = [*common, "--write-subs", "--sub-langs", lang, url]
+                tried_any = True if run_cmd(args) else tried_any
+                sub_path = find_new_sub(lang)
+                if sub_path and sub_path.exists():
+                    subs_text = self._parse_subtitle_file(sub_path)
+                    if subs_text and subs_text.strip():
+                        break
+                # Auto next
+                args = [*common, "--write-auto-subs", "--sub-langs", lang, url]
+                tried_any = True if run_cmd(args) else tried_any
+                sub_path = find_new_sub(lang)
+                if sub_path and sub_path.exists():
+                    subs_text = self._parse_subtitle_file(sub_path)
+                    if subs_text and subs_text.strip():
+                        break
+            else:
+                # Auto first
+                args = [*common, "--write-auto-subs", "--sub-langs", lang, url]
+                tried_any = True if run_cmd(args) else tried_any
+                sub_path = find_new_sub(lang)
+                if sub_path and sub_path.exists():
+                    subs_text = self._parse_subtitle_file(sub_path)
+                    if subs_text and subs_text.strip():
+                        break
+                # Native next
+                args = [*common, "--write-subs", "--sub-langs", lang, url]
+                tried_any = True if run_cmd(args) else tried_any
+                sub_path = find_new_sub(lang)
+                if sub_path and sub_path.exists():
+                    subs_text = self._parse_subtitle_file(sub_path)
+                    if subs_text and subs_text.strip():
+                        break
+
+        # Cleanup temp dir; keep errors silent
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(base, ignore_errors=True)
+        except Exception:
+            pass
+
+        return subs_text
+
+    def _parse_subtitle_file(self, path: "Path") -> str:
+        try:
+            data = Path(path).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            try:
+                data = Path(path).read_text(encoding="latin-1", errors="ignore")
+            except Exception:
+                return ""
+
+        # Detect format by extension or header
+        name_lower = str(path).lower()
+        if name_lower.endswith(".vtt") or data.lstrip().upper().startswith("WEBVTT"):
+            return self._vtt_to_text(data)
+        return self._srt_to_text(data)
+
+    @staticmethod
+    def _vtt_to_text(vtt: str) -> str:
+        lines = []
+        for raw in (vtt or "").splitlines():
+            s = raw.strip("\ufeff\n\r ")
+            if not s:
+                continue
+            if s.upper().startswith("WEBVTT"):
+                continue
+            # Skip timestamp lines like 00:00:05.000 --> 00:00:07.000
+            if "-->" in s and any(ch.isdigit() for ch in s):
+                continue
+            # Drop metadata/style markers
+            if s.startswith("NOTE") or s.startswith("STYLE") or s.startswith("REGION"):
+                continue
+            lines.append(s)
+        # Merge and de-duplicate consecutive caption lines
+        text = "\n".join(lines)
+        # Remove common annotations
+        text = re.sub(r"\[(?:Music|Applause|Laughter|Silence)\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    @staticmethod
+    def _srt_to_text(srt: str) -> str:
+        lines = []
+        for raw in (srt or "").splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            # Skip index numbers
+            if s.isdigit():
+                continue
+            # Skip timestamp lines like 00:00:05,000 --> 00:00:07,000
+            if "-->" in s and any(ch.isdigit() for ch in s):
+                continue
+            lines.append(s)
+        text = " ".join(lines)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _llm_process_blocking(self, text: str) -> str:
+        # Route based on provider + available key
+        provider = (self.llm_provider or "anthropic").strip().lower()
+        try:
+            from src.llm_anthropic import process_text  # type: ignore
+        except Exception:
+            from llm_anthropic import process_text  # type: ignore
+
+        if provider == "openrouter":
+            api_key = (self.openrouter_api_key or "").strip() or os.environ.get("OPENROUTER_API_KEY", "")
+            model = self.anthropic_model or "anthropic/claude-sonnet-4.5"
+        else:
+            api_key = (self.anthropic_api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+            # Accept both Anthropic id and OpenRouter id; process_text handles mapping
+            model = self.anthropic_model or "claude-4.5-sonnet"
+
+        return process_text(
+            str(text or ""),
+            api_key=str(api_key or ""),
+            model=str(model or "claude-4.5-sonnet"),
+            system_prompt=str(self.anthropic_prompt or ""),
+            max_tokens=int(self.anthropic_max_tokens or 2048),
+            temperature=float(self.anthropic_temperature or 0.2),
+            timeout_s=int(self.anthropic_timeout_seconds or 60),
+            retries=int(self.anthropic_retry_count or 10),
+        )
 
     async def _convert_image_to_epub_async(self, image: Image.Image) -> Optional[str]:
         try:
@@ -535,39 +900,71 @@ class ClipboardToEpubConverter:
             # Optional static TOC page if provided by processor
             if toc_html:
                 toc_page = epub.EpubHtml(uid="toc", file_name="toc.xhtml", title="Table of Contents")
-                page_content = toc_html.strip()
-                if not (page_content.lower().startswith("<!doctype") or page_content.lower().startswith("<html")):
-                    page_content = f"""<!DOCTYPE html>
+                page_content = (toc_html or "").strip()
+                if "\x00" in page_content:
+                    page_content = page_content.replace("\x00", "")
+                # Always wrap TOC in a minimal XHTML skeleton
+                try:
+                    inner = page_content
+                    try:
+                        from bs4 import BeautifulSoup  # type: ignore
+                        soup = BeautifulSoup(page_content, 'html.parser')
+                        if soup.body:
+                            inner = soup.body.decode_contents() or inner
+                    except Exception:
+                        pass
+                    page_content = f"""
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
+    <meta charset=\"UTF-8\"/>
     <title>Table of Contents</title>
     <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
 </head>
 <body>
-    {page_content}
+    {inner}
 </body>
 </html>"""
-                toc_page.content = page_content
+                except Exception:
+                    # Fallback simple page
+                    page_content = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"UTF-8\"/><title>Table of Contents</title><link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/></head><body></body></html>"
+                toc_page.content = page_content.encode("utf-8", errors="ignore")
                 book.add_item(toc_page)
                 epub_chapters.append(toc_page)
-            for idx, chapter in enumerate(chapters, 1):
-                html = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
-                chapter_content = chapter["content"]
-                if not (chapter_content.strip().startswith("<!DOCTYPE") or chapter_content.strip().startswith("<html")):
-                    chapter_content = f"""<!DOCTYPE html>
+            def _ensure_xhtml(doc_title: str, content: str) -> bytes:
+                txt = (content or "").strip()
+                # Strip NULs which break libxml encoders
+                if "\x00" in txt:
+                    txt = txt.replace("\x00", "")
+                inner = txt
+                # Extract body inner HTML if content is a full document to avoid nested <html>
+                try:
+                    from bs4 import BeautifulSoup  # type: ignore
+                    soup = BeautifulSoup(txt, 'html.parser')
+                    if soup.body:
+                        inner = soup.body.decode_contents() or inner
+                except Exception:
+                    pass
+                # Build minimal XHTML wrapper and force UTF-8 bytes
+                wrapped = f"""
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
-    <title>{chapter['title']}</title>
+    <meta charset=\"UTF-8\"/>
+    <title>{doc_title}</title>
     <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
 </head>
 <body>
-    <h1>{chapter['title']}</h1>
-    {chapter_content}
+    <h1>{doc_title}</h1>
+    {inner}
 </body>
 </html>"""
-                html.content = chapter_content
-                book.add_item(html)
-                epub_chapters.append(html)
+                return wrapped.encode("utf-8", errors="ignore")
+
+            for idx, chapter in enumerate(chapters, 1):
+                html_item = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
+                safe_bytes = _ensure_xhtml(chapter["title"], chapter["content"])
+                html_item.content = safe_bytes
+                book.add_item(html_item)
+                epub_chapters.append(html_item)
 
             book.spine = ["nav"] + epub_chapters
             book.toc = epub_chapters
@@ -613,7 +1010,18 @@ class ClipboardToEpubConverter:
 
         if key == keyboard.Key.esc:
             logger.info("ESC pressed, stopping listener")
-            return False
+            # Avoid returning False here to prevent StopException bubbling through macOS event tap.
+            # Stop the listener asynchronously instead.
+            def _stop():
+                try:
+                    if self.listener:
+                        self.listener.stop()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_stop, daemon=True)
+            t.start()
+            return
 
     def _trigger_conversion(self):
         def run():

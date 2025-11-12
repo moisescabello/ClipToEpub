@@ -51,6 +51,24 @@ DEFAULT_CONFIG = {
     "auto_open": False,
     "show_notifications": True,
     "chapter_words": 5000,
+    # YouTube subtitles
+    "youtube_lang_1": "en",
+    "youtube_lang_2": "es",
+    "youtube_lang_3": "pt",
+    "youtube_prefer_native": True,
+    # LLM defaults
+    "anthropic_api_key": "",
+    # Default model for OpenRouter (Sonnet 4.5 – 1M)
+    "anthropic_model": "anthropic/claude-sonnet-4.5",
+    "anthropic_prompt": "",
+    "anthropic_max_tokens": 2048,
+    "anthropic_temperature": 0.2,
+    "anthropic_timeout_seconds": 60,
+    "anthropic_retry_count": 10,
+    "anthropic_hotkey": "ctrl+shift+l" if sys.platform.startswith("win") else "cmd+shift+l",
+    # Provider selection and OpenRouter key
+    "llm_provider": "openrouter",
+    "openrouter_api_key": "",
 }
 
 
@@ -150,6 +168,11 @@ class WindowsTrayApp:
         self._recent_timer.timeout.connect(self._refresh_recent_menu)
         self._recent_timer.start()
 
+        # LLM hotkey listener
+        self.llm_listener = None
+        self.llm_current_keys = set()
+        self._setup_llm_hotkey()
+
     # ---- Converter ----
     def _build_converter(self):
         hotkey_combo = parse_hotkey_string(self.config.get("hotkey"))
@@ -161,6 +184,22 @@ class WindowsTrayApp:
                 default_style=self.config["style"],
                 chapter_words=self.config["chapter_words"],
                 hotkey_combo=hotkey_combo,
+                # YouTube + LLM config
+                youtube_langs=[
+                    str(self.config.get("youtube_lang_1", "en")),
+                    str(self.config.get("youtube_lang_2", "es")),
+                    str(self.config.get("youtube_lang_3", "pt")),
+                ],
+                youtube_prefer_native=bool(self.config.get("youtube_prefer_native", True)),
+                llm_provider=str(self.config.get("llm_provider", "openrouter")),
+                anthropic_api_key=str(self.config.get("anthropic_api_key", "")),
+                openrouter_api_key=str(self.config.get("openrouter_api_key", "")),
+                anthropic_model=str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")),
+                anthropic_prompt=str(self.config.get("anthropic_prompt", "")),
+                anthropic_max_tokens=int(self.config.get("anthropic_max_tokens", 2048)),
+                anthropic_temperature=float(self.config.get("anthropic_temperature", 0.2)),
+                anthropic_timeout_seconds=int(self.config.get("anthropic_timeout_seconds", 60)),
+                anthropic_retry_count=int(self.config.get("anthropic_retry_count", 10)),
             )
             # Attach callback for conversions
             def on_conversion(filepath: str):
@@ -202,6 +241,11 @@ class WindowsTrayApp:
         action_convert.triggered.connect(self._convert_now)
         self.menu.addAction(action_convert)
 
+        # Convert with LLM
+        action_convert_llm = QAction("Convert with LLM", self.menu)
+        action_convert_llm.triggered.connect(self._convert_with_llm)
+        self.menu.addAction(action_convert_llm)
+
         self.menu.addSeparator()
 
         # Open output folder
@@ -241,6 +285,8 @@ class WindowsTrayApp:
 
         # Start listener last
         self._start_listener_thread()
+        # Ensure LLM listener is running
+        self._setup_llm_hotkey()
 
     def _populate_recent_menu(self):
         self.recent_menu.clear()
@@ -325,6 +371,7 @@ class WindowsTrayApp:
             self.config = load_config()
             self._build_converter()
             self._build_menu()
+            self._setup_llm_hotkey()
 
             # Optional feedback
             if res and res.returncode != 0:
@@ -336,9 +383,150 @@ class WindowsTrayApp:
         try:
             if self.converter:
                 self.converter.stop_listening()
+            if self.llm_listener:
+                try:
+                    self.llm_listener.stop()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Warning: Error stopping converter on quit: {e}")
         QApplication.quit()
+
+    # ---- LLM ----
+    def _convert_with_llm(self):
+        if not self.converter:
+            return
+        try:
+            # If clipboard contains a YouTube URL, delegate to converter's pipeline
+            def _looks_like_youtube_url(text: str) -> bool:
+                try:
+                    from urllib.parse import urlparse
+                    t = (text or "").strip()
+                    if not t or "\n" in t:
+                        return False
+                    u = urlparse(t)
+                    if u.scheme not in ("http", "https"):
+                        return False
+                    host = (u.netloc or "").lower()
+                    return ("youtube.com" in host) or ("youtu.be" in host)
+                except Exception:
+                    return False
+
+            import pyperclip
+            clip_text = pyperclip.paste() or ""
+            if clip_text and _looks_like_youtube_url(str(clip_text)):
+                def run_youtube():
+                    try:
+                        path = self.converter.convert_clipboard_content() if self.converter else None
+                        if path:
+                            if self.config.get("show_notifications", True):
+                                self.tray.showMessage("ePub Created", os.path.basename(path))
+                            if self.config.get("auto_open", False):
+                                try:
+                                    os.startfile(path)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                        else:
+                            self.tray.showMessage("Conversion Error", "Could not create ePub from YouTube subtitles")
+                    except Exception as e:
+                        self.tray.showMessage("LLM Error", str(e))
+
+                threading.Thread(target=run_youtube, daemon=True).start()
+                return
+
+            provider = str(self.config.get("llm_provider", "anthropic")).strip().lower()
+            if provider == "openrouter":
+                api_key = os.environ.get("OPENROUTER_API_KEY") or str(self.config.get("openrouter_api_key", ""))
+                model = str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")) or "anthropic/claude-sonnet-4.5"
+                if "/" not in model:
+                    if model.lower() in {"claude-4.5-sonnet", "claude-sonnet-4.5", "sonnet-4.5"}:
+                        model = "anthropic/claude-sonnet-4.5"
+            else:
+                api_key = os.environ.get("ANTHROPIC_API_KEY") or str(self.config.get("anthropic_api_key", ""))
+                model = str(self.config.get("anthropic_model", "claude-4.5-sonnet")) or "claude-4.5-sonnet"
+                if "/" in model:
+                    if model.lower() in {"anthropic/claude-sonnet-4.5"}:
+                        model = "claude-4.5-sonnet"
+            prompt = str(self.config.get("anthropic_prompt", ""))
+            max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+            temperature = float(self.config.get("anthropic_temperature", 0.2))
+            timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+            retries = int(self.config.get("anthropic_retry_count", 10))
+
+            if not api_key or not prompt:
+                self.tray.showMessage("Anthropic", "Configure API Key and Prompt in Settings")
+                return
+
+            if not clip_text.strip():
+                self.tray.showMessage("No Content", "Clipboard is empty or contains no text")
+                return
+
+            def run():
+                try:
+                    try:
+                        from src.llm_anthropic import process_text, sanitize_first_line  # type: ignore
+                    except Exception:
+                        from llm_anthropic import process_text, sanitize_first_line  # type: ignore
+
+                    md = process_text(
+                        str(clip_text),
+                        api_key=str(api_key),
+                        model=str(model),
+                        system_prompt=str(prompt),
+                        max_tokens=int(max_tokens),
+                        temperature=float(temperature),
+                        timeout_s=int(timeout_s),
+                        retries=int(retries),
+                    )
+
+                    title = sanitize_first_line(md)
+                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=["anthropic"]) if self.converter else None
+                    if path:
+                        if self.config.get("show_notifications", True):
+                            self.tray.showMessage("ePub Created", os.path.basename(path))
+                        if self.config.get("auto_open", False):
+                            try:
+                                os.startfile(path)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                    else:
+                        self.tray.showMessage("Conversion Error", "Could not create ePub from LLM output")
+                except Exception as e:
+                    self.tray.showMessage("LLM Error", str(e))
+
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+        except Exception as e:
+            self.tray.showMessage("Error", f"LLM conversion failed: {e}")
+
+    def _setup_llm_hotkey(self):
+        try:
+            from pynput import keyboard
+        except Exception as e:
+            print(f"LLM hotkey setup skipped: {e}")
+            return
+
+        combo = parse_hotkey_string(self.config.get("anthropic_hotkey")) or set()
+        self.llm_hotkey = combo
+
+        def on_press(key):
+            self.llm_current_keys.add(key)
+            if self.llm_hotkey and self.llm_hotkey.issubset(self.llm_current_keys):
+                self._convert_with_llm()
+
+        def on_release(key):
+            try:
+                self.llm_current_keys.remove(key)
+            except KeyError:
+                pass
+
+        try:
+            if self.llm_listener:
+                self.llm_listener.stop()
+            self.llm_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self.llm_listener.start()
+        except Exception as e:
+            print(f"LLM hotkey listener error: {e}")
 
 
 def main():

@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import json
 from pathlib import Path
 import sys
+import os
 # Robust import for paths whether run from repo root or src/
 try:
     from src import paths as paths  # type: ignore
@@ -33,7 +34,25 @@ class ConfigWindow:
             "style": "default",
             "auto_open": False,
             "show_notifications": True,
-            "chapter_words": 5000
+            "chapter_words": 5000,
+            # YouTube subtitles
+            "youtube_lang_1": "en",
+            "youtube_lang_2": "es",
+            "youtube_lang_3": "pt",
+            "youtube_prefer_native": True,
+            # LLM defaults
+            "anthropic_api_key": "",
+            # Default model for OpenRouter (Sonnet 4.5 – 1M)
+            "anthropic_model": "anthropic/claude-sonnet-4.5",
+            "anthropic_prompt": "",
+            "anthropic_max_tokens": 2048,
+            "anthropic_temperature": 0.2,
+            "anthropic_timeout_seconds": 60,
+            "anthropic_retry_count": 10,
+            "anthropic_hotkey": ("ctrl+shift+l" if not sys.platform.startswith("darwin") else "cmd+shift+l"),
+            # Provider selection and OpenRouter key
+            "llm_provider": "openrouter",
+            "openrouter_api_key": "",
         }
 
         # Load current configuration
@@ -81,6 +100,45 @@ class ConfigWindow:
                 self.config["chapter_words"] = chapter_words
             except ValueError:
                 self.config["chapter_words"] = 5000
+
+            # LLM settings
+            self.config["llm_provider"] = (self.llm_provider_var.get() or self.default_config["llm_provider"]).strip()
+            self.config["anthropic_api_key"] = self.anthropic_api_key_var.get().strip()
+            self.config["openrouter_api_key"] = self.openrouter_api_key_var.get().strip()
+            self.config["anthropic_model"] = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
+            self.config["anthropic_prompt"] = self.anthropic_prompt_text.get("1.0", tk.END).strip()
+            try:
+                self.config["anthropic_max_tokens"] = int(self.anthropic_max_tokens_var.get())
+            except ValueError:
+                self.config["anthropic_max_tokens"] = 2048
+            try:
+                self.config["anthropic_temperature"] = float(self.anthropic_temperature_var.get())
+            except ValueError:
+                self.config["anthropic_temperature"] = 0.2
+            try:
+                self.config["anthropic_timeout_seconds"] = int(self.anthropic_timeout_seconds_var.get())
+            except ValueError:
+                self.config["anthropic_timeout_seconds"] = 60
+            try:
+                self.config["anthropic_retry_count"] = int(self.anthropic_retry_count_var.get())
+            except ValueError:
+                self.config["anthropic_retry_count"] = 10
+            self.config["anthropic_hotkey"] = (self.anthropic_hotkey_var.get().strip() or self.default_config["anthropic_hotkey"]).lower()
+
+            # YouTube settings
+            def _to_code(val: str, default: str) -> str:
+                s = (val or "").strip()
+                # Expect pattern like 'en – English'
+                if "–" in s:
+                    s = s.split("–", 1)[0].strip()
+                elif "-" in s:
+                    # Fallback if hyphen used by some themes/fonts
+                    s = s.split("-", 1)[0].strip()
+                return s or default
+            self.config["youtube_lang_1"] = _to_code(self.yt_lang1_var.get(), "en")
+            self.config["youtube_lang_2"] = _to_code(self.yt_lang2_var.get(), "es")
+            self.config["youtube_lang_3"] = _to_code(self.yt_lang3_var.get(), "pt")
+            self.config["youtube_prefer_native"] = bool(self.yt_prefer_native_var.get())
 
             # Create preferences directory if needed
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,9 +320,247 @@ class ConfigWindow:
         # Separator
         ttk.Separator(main_frame, orient='horizontal').grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=15)
 
+        # YouTube subtitles
+        yt_frame = ttk.LabelFrame(main_frame, text="YouTube Subtitles", padding="10")
+        yt_frame.grid(row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        langs = [
+            ("en", "English"),
+            ("es", "Spanish"),
+            ("pt", "Portuguese"),
+            ("hi", "Hindi"),
+            ("id", "Indonesian"),
+            ("ar", "Arabic"),
+            ("ru", "Russian"),
+            ("ja", "Japanese"),
+            ("ko", "Korean"),
+            ("fr", "French"),
+            ("de", "German"),
+            ("tr", "Turkish"),
+        ]
+        def _lang_values():
+            return [f"{c} – {n}" for c, n in langs]
+        # Helper to map display -> code
+        disp_to_code = {f"{c} – {n}": c for c, n in langs}
+        ttk.Label(yt_frame, text="Preferred language 1:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.yt_lang1_var = tk.StringVar()
+        yt1 = ttk.Combobox(yt_frame, textvariable=self.yt_lang1_var, values=_lang_values(), width=32, state="readonly")
+        yt1.grid(row=0, column=1, sticky=tk.W, pady=5)
+        ttk.Label(yt_frame, text="Preferred language 2:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.yt_lang2_var = tk.StringVar()
+        yt2 = ttk.Combobox(yt_frame, textvariable=self.yt_lang2_var, values=_lang_values(), width=32, state="readonly")
+        yt2.grid(row=1, column=1, sticky=tk.W, pady=5)
+        ttk.Label(yt_frame, text="Preferred language 3:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.yt_lang3_var = tk.StringVar()
+        yt3 = ttk.Combobox(yt_frame, textvariable=self.yt_lang3_var, values=_lang_values(), width=32, state="readonly")
+        yt3.grid(row=2, column=1, sticky=tk.W, pady=5)
+        # Initialize selections
+        def _set_lang(var: tk.StringVar, code: str):
+            for disp, c in disp_to_code.items():
+                if c == (code or "").strip().lower():
+                    var.set(disp)
+                    return
+        _set_lang(self.yt_lang1_var, self.config.get("youtube_lang_1", "en"))
+        _set_lang(self.yt_lang2_var, self.config.get("youtube_lang_2", "es"))
+        _set_lang(self.yt_lang3_var, self.config.get("youtube_lang_3", "pt"))
+        self.yt_prefer_native_var = tk.BooleanVar(value=bool(self.config.get("youtube_prefer_native", True)))
+        ttk.Checkbutton(yt_frame, text="Prefer native subtitles; fallback to auto-generated", variable=self.yt_prefer_native_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        # LLM settings
+        llm_frame = ttk.LabelFrame(main_frame, text="LLM", padding="10")
+        llm_frame.grid(row=14, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+
+        ttk.Label(llm_frame, text="API Key:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.anthropic_api_key_var = tk.StringVar(value=self.config.get("anthropic_api_key", ""))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_api_key_var, show="*", width=40).grid(row=0, column=1, sticky=tk.W)
+
+        # OpenRouter key (optional; used if provider=openrouter)
+        ttk.Label(llm_frame, text="OpenRouter Key:").grid(row=0, column=2, sticky=tk.W, pady=5, padx=(10, 0))
+        self.openrouter_api_key_var = tk.StringVar(value=self.config.get("openrouter_api_key", ""))
+        ttk.Entry(llm_frame, textvariable=self.openrouter_api_key_var, show="*", width=30).grid(row=0, column=3, sticky=tk.W)
+
+        ttk.Label(llm_frame, text="Model:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.anthropic_model_var = tk.StringVar(value=self.config.get("anthropic_model", self.default_config["anthropic_model"]))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_model_var, width=40).grid(row=1, column=1, sticky=tk.W)
+        ttk.Label(llm_frame, text="e.g., claude-4.5-sonnet or anthropic/claude-sonnet-4.5", foreground="#555").grid(row=1, column=1, sticky=tk.E, padx=(0,4))
+
+        # Model preset (common ids); updates model and provider
+        ttk.Label(llm_frame, text="Preset:").grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+        self.model_preset_var = tk.StringVar(value="")
+        preset_combo = ttk.Combobox(
+            llm_frame,
+            textvariable=self.model_preset_var,
+            values=[
+                "— Select preset —",
+                "Sonnet 4.5 – OpenRouter (1M)",
+                "Sonnet 4.5 – Anthropic",
+                "Mistral Medium 3.1 – OpenRouter (128k)",
+            ],
+            width=32,
+            state="readonly",
+        )
+        preset_combo.grid(row=1, column=3, sticky=tk.W)
+
+        def _on_preset_change(*_):
+            label = (self.model_preset_var.get() or "").lower()
+            if "mistral" in label:
+                self.anthropic_model_var.set("mistralai/mistral-medium-3.1")
+                self.llm_provider_var.set("openrouter")
+            elif "openrouter" in label and "sonnet" in label:
+                self.anthropic_model_var.set("anthropic/claude-sonnet-4.5")
+                self.llm_provider_var.set("openrouter")
+            elif "anthropic" in label and "sonnet" in label:
+                self.anthropic_model_var.set("claude-4.5-sonnet")
+                self.llm_provider_var.set("anthropic")
+            else:
+                return
+        try:
+            if hasattr(self.model_preset_var, 'trace_add'):
+                self.model_preset_var.trace_add('write', _on_preset_change)
+            else:
+                self.model_preset_var.trace('w', _on_preset_change)
+        except Exception:
+            pass
+
+        ttk.Label(llm_frame, text="LLM Hotkey:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.anthropic_hotkey_var = tk.StringVar(value=self.config.get("anthropic_hotkey", self.default_config["anthropic_hotkey"]))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_hotkey_var, width=20).grid(row=2, column=1, sticky=tk.W)
+
+        ttk.Label(llm_frame, text="System Prompt:").grid(row=3, column=0, sticky=tk.NW, pady=5)
+        self.anthropic_prompt_text = tk.Text(llm_frame, height=6, width=48)
+        self.anthropic_prompt_text.insert("1.0", self.config.get("anthropic_prompt", ""))
+        self.anthropic_prompt_text.grid(row=3, column=1, sticky=tk.W)
+
+        # Numeric params
+        ttk.Label(llm_frame, text="Max Tokens:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.anthropic_max_tokens_var = tk.StringVar(value=str(self.config.get("anthropic_max_tokens", 2048)))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_max_tokens_var, width=10).grid(row=4, column=1, sticky=tk.W)
+        ttk.Label(llm_frame, text="Output token cap; not context window", foreground="#555").grid(row=4, column=1, sticky=tk.E, padx=(0,4))
+
+        # Provider hint for Sonnet 4.5 (OpenRouter)
+        ttk.Label(llm_frame, text="For Sonnet 4.5 (1M context) use OpenRouter id 'anthropic/claude-sonnet-4.5' and set OPENROUTER_API_KEY.", foreground="#555").grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(2, 2))
+
+        ttk.Label(llm_frame, text="Temperature:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        self.anthropic_temperature_var = tk.StringVar(value=str(self.config.get("anthropic_temperature", 0.2)))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_temperature_var, width=10).grid(row=5, column=1, sticky=tk.W)
+
+        ttk.Label(llm_frame, text="Timeout (s):").grid(row=6, column=0, sticky=tk.W, pady=5)
+        self.anthropic_timeout_seconds_var = tk.StringVar(value=str(self.config.get("anthropic_timeout_seconds", 60)))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_timeout_seconds_var, width=10).grid(row=6, column=1, sticky=tk.W)
+
+        ttk.Label(llm_frame, text="Retries:").grid(row=7, column=0, sticky=tk.W, pady=5)
+        self.anthropic_retry_count_var = tk.StringVar(value=str(self.config.get("anthropic_retry_count", 10)))
+        ttk.Entry(llm_frame, textvariable=self.anthropic_retry_count_var, width=10).grid(row=7, column=1, sticky=tk.W)
+
+        # Provider selection
+        ttk.Label(llm_frame, text="Provider:").grid(row=9, column=0, sticky=tk.W, pady=5)
+        self.llm_provider_var = tk.StringVar(value=self.config.get("llm_provider", self.default_config.get("llm_provider", "anthropic")))
+        provider_combo = ttk.Combobox(
+            llm_frame,
+            textvariable=self.llm_provider_var,
+            values=["anthropic", "openrouter"],
+            width=20,
+            state="readonly"
+        )
+        provider_combo.grid(row=9, column=1, sticky=tk.W)
+
+        def _test_llm():
+            try:
+                try:
+                    from src.llm_anthropic import process_text  # type: ignore
+                except Exception:
+                    from llm_anthropic import process_text  # type: ignore
+                provider = (self.llm_provider_var.get() or "anthropic").strip().lower()
+                if provider == "openrouter":
+                    api_key = self.openrouter_api_key_var.get().strip() or os.environ.get("OPENROUTER_API_KEY", "")
+                    model = self.anthropic_model_var.get().strip() or "anthropic/claude-sonnet-4.5"
+                else:
+                    api_key = self.anthropic_api_key_var.get().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+                    model = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
+                prompt = self.anthropic_prompt_text.get("1.0", tk.END).strip() or "Return the input as Markdown."
+                sample = "Test message from Clipboard to ePub"
+                md = process_text(sample, api_key=api_key, model=model, system_prompt=prompt, max_tokens=128, temperature=0.0, timeout_s=30, retries=2)
+                preview = "\n".join((md or "").strip().splitlines()[0:3])
+                messagebox.showinfo("LLM OK", preview or "Received response")
+            except Exception as e:
+                messagebox.showerror("LLM Error", str(e))
+
+        ttk.Button(llm_frame, text="Test Connection", command=_test_llm).grid(row=8, column=0, pady=6, sticky=tk.W)
+
+        # Auto-timeout from tokens with manual override support
+        self._timeout_user_edited = False
+        self._updating_timeout_programmatically = False
+        self._initial_tokens_value = self.anthropic_max_tokens_var.get()
+
+        def _recommended_timeout(tokens: int) -> int:
+            # Heuristic: ~50 tok/s + 30s buffer; clamp 30..300
+            try:
+                v = int(tokens)
+            except Exception:
+                v = 0
+            rec = int(round(v / 50.0)) + 30
+            if rec < 30:
+                rec = 30
+            if rec > 300:
+                rec = 300
+            return rec
+
+        def _on_timeout_user_change(*_):
+            if self._updating_timeout_programmatically:
+                return
+            self._timeout_user_edited = True
+
+        def _on_tokens_change(*_):
+            # Only auto-adjust when user actually changed tokens after opening
+            new_val = self.anthropic_max_tokens_var.get()
+            if new_val == self._initial_tokens_value:
+                return
+            if self._timeout_user_edited:
+                return
+            try:
+                rec = _recommended_timeout(int(new_val))
+            except Exception:
+                return
+            self._updating_timeout_programmatically = True
+            try:
+                self.anthropic_timeout_seconds_var.set(str(rec))
+            finally:
+                self._updating_timeout_programmatically = False
+            # Update baseline so subsequent changes keep auto-adjusting
+            self._initial_tokens_value = new_val
+
+        def _reset_timeout():
+            try:
+                tokens = int(self.anthropic_max_tokens_var.get())
+            except Exception:
+                tokens = 0
+            rec = _recommended_timeout(tokens)
+            self._updating_timeout_programmatically = True
+            try:
+                self.anthropic_timeout_seconds_var.set(str(rec))
+            finally:
+                self._updating_timeout_programmatically = False
+            # Re-enable auto updates on future token changes
+            self._timeout_user_edited = False
+
+        ttk.Button(llm_frame, text="Reset Timeout (Recommended)", command=_reset_timeout).grid(row=8, column=1, pady=6, sticky=tk.W)
+
+        try:
+            # Trace user edits on timeout
+            if hasattr(self.anthropic_timeout_seconds_var, 'trace_add'):
+                self.anthropic_timeout_seconds_var.trace_add('write', _on_timeout_user_change)
+            else:
+                self.anthropic_timeout_seconds_var.trace('w', _on_timeout_user_change)
+            # Trace token changes
+            if hasattr(self.anthropic_max_tokens_var, 'trace_add'):
+                self.anthropic_max_tokens_var.trace_add('write', _on_tokens_change)
+            else:
+                self.anthropic_max_tokens_var.trace('w', _on_tokens_change)
+        except Exception:
+            pass
+
         # Info section
         info_frame = ttk.LabelFrame(main_frame, text="Info", padding="10")
-        info_frame.grid(row=12, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        info_frame.grid(row=13, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
 
         info_text = f"Current Hotkey: {self.config.get('hotkey', self.default_config['hotkey']).upper()}\n"
         info_text += f"Config Location: {self.config_path}\n"
@@ -274,7 +570,7 @@ class ConfigWindow:
 
         # Buttons
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=13, column=0, columnspan=2, pady=(20, 0))
+        button_frame.grid(row=14, column=0, columnspan=2, pady=(20, 0))
 
         ttk.Button(
             button_frame,
@@ -313,6 +609,19 @@ class ConfigWindow:
             self.auto_open_var.set(self.default_config["auto_open"])
             self.notifications_var.set(self.default_config["show_notifications"])
             self.chapter_words_var.set(str(self.default_config["chapter_words"]))
+            self.anthropic_api_key_var.set("")
+            try:
+                self.llm_provider_var.set(self.default_config.get("llm_provider", "anthropic"))
+                self.openrouter_api_key_var.set("")
+            except Exception:
+                pass
+            self.anthropic_model_var.set(self.default_config["anthropic_model"])
+            self.anthropic_prompt_text.delete("1.0", tk.END)
+            self.anthropic_max_tokens_var.set(str(self.default_config["anthropic_max_tokens"]))
+            self.anthropic_temperature_var.set(str(self.default_config["anthropic_temperature"]))
+            self.anthropic_timeout_seconds_var.set(str(self.default_config["anthropic_timeout_seconds"]))
+            self.anthropic_retry_count_var.set(str(self.default_config["anthropic_retry_count"]))
+            self.anthropic_hotkey_var.set(self.default_config["anthropic_hotkey"]) 
 
     # ---- Hotkey capture helpers ----
     def _start_hotkey_record(self):

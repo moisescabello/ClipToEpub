@@ -26,6 +26,10 @@ Pillow>=9.1           # Image processing (Resampling API)
 aiofiles              # Async file operations
 pytesseract           # OCR support
 
+# LLM integration
+anthropic             # Official SDK for Anthropic Messages API
+httpx                 # REST fallback HTTP client
+
 # Development dependencies
 black==23.11.0        # Code formatting
 flake8==6.1.0         # Linting

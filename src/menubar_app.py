@@ -71,7 +71,25 @@ class ClipToEpubApp(rumps.App):
             "style": "default",
             "auto_open": False,
             "show_notifications": True,
-            "chapter_words": 5000
+            "chapter_words": 5000,
+            # YouTube subtitles
+            "youtube_lang_1": "en",
+            "youtube_lang_2": "es",
+            "youtube_lang_3": "pt",
+            "youtube_prefer_native": True,
+            # LLM defaults
+            "anthropic_api_key": "",
+            # Default model for OpenRouter (Sonnet 4.5 – 1M)
+            "anthropic_model": "anthropic/claude-sonnet-4.5",
+            "anthropic_prompt": "",
+            "anthropic_max_tokens": 2048,
+            "anthropic_temperature": 0.2,
+            "anthropic_timeout_seconds": 60,
+            "anthropic_retry_count": 10,
+            "anthropic_hotkey": "cmd+shift+l",
+            # Provider selection and OpenRouter key
+            "llm_provider": "openrouter",
+            "openrouter_api_key": "",
         }
 
         # Load existing configuration
@@ -87,6 +105,31 @@ class ClipToEpubApp(rumps.App):
         # Start converter in background thread
         self.converter_thread = None
         self.start_converter()
+
+        # Setup LLM hotkey listener
+        self.llm_listener = None
+        self.llm_current_keys = set()
+        # Defer LLM hotkey creation until the app event loop is running
+        # to avoid macOS Abort trap crashes from early event taps.
+        try:
+            self._call_on_main_thread_once(0.3, self._setup_llm_hotkey)
+        except Exception as e:
+            print(f"LLM hotkey schedule error: {e}")
+
+    def _call_on_main_thread_once(self, delay_seconds, func):
+        """Schedule a one-shot call on the rumps main loop thread."""
+        try:
+            def _wrapper(timer):
+                try:
+                    func()
+                finally:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+            rumps.Timer(_wrapper, delay_seconds).start()
+        except Exception as e:
+            print(f"One-shot schedule error: {e}")
 
     def load_config(self):
         """Load configuration from file"""
@@ -159,6 +202,22 @@ class ClipToEpubApp(rumps.App):
                 default_style=self.config["style"],
                 chapter_words=self.config["chapter_words"],
                 hotkey_combo=hotkey_combo,
+                # YouTube + LLM config
+                youtube_langs=[
+                    str(self.config.get("youtube_lang_1", "en")),
+                    str(self.config.get("youtube_lang_2", "es")),
+                    str(self.config.get("youtube_lang_3", "pt")),
+                ],
+                youtube_prefer_native=bool(self.config.get("youtube_prefer_native", True)),
+                llm_provider=str(self.config.get("llm_provider", "openrouter")),
+                anthropic_api_key=str(self.config.get("anthropic_api_key", "")),
+                openrouter_api_key=str(self.config.get("openrouter_api_key", "")),
+                anthropic_model=str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")),
+                anthropic_prompt=str(self.config.get("anthropic_prompt", "")),
+                anthropic_max_tokens=int(self.config.get("anthropic_max_tokens", 2048)),
+                anthropic_temperature=float(self.config.get("anthropic_temperature", 0.2)),
+                anthropic_timeout_seconds=int(self.config.get("anthropic_timeout_seconds", 60)),
+                anthropic_retry_count=int(self.config.get("anthropic_retry_count", 10)),
             )
         except Exception as e:
             print(f"Error initializing converter: {e}")
@@ -169,6 +228,7 @@ class ClipToEpubApp(rumps.App):
         # Convert now button
         self.menu = [
             rumps.MenuItem("Convert Now", callback=self.convert_now),
+            rumps.MenuItem("Convert with LLM", callback=self.convert_with_llm),
             None,  # Separator
             rumps.MenuItem("Open ePubs Folder", callback=self.open_folder),
             rumps.MenuItem("Recent Conversions", callback=None),
@@ -257,6 +317,121 @@ class ClipToEpubApp(rumps.App):
         except Exception as e:
             print(f"Error during conversion: {e}")
             self.notify("Conversion Error", str(e))
+
+    def convert_with_llm(self, sender=None):
+        """Send clipboard text through Anthropic and convert returned Markdown to ePub."""
+        try:
+            # If clipboard is a YouTube URL, delegate to converter's YouTube flow
+            def _looks_like_youtube_url(text: str) -> bool:
+                try:
+                    from urllib.parse import urlparse
+                    t = (text or "").strip()
+                    if not t or "\n" in t:
+                        return False
+                    u = urlparse(t)
+                    if u.scheme not in ("http", "https"):
+                        return False
+                    host = (u.netloc or "").lower()
+                    return ("youtube.com" in host) or ("youtu.be" in host)
+                except Exception:
+                    return False
+
+            try:
+                import pyperclip
+                clip_text = pyperclip.paste()
+            except Exception as e:
+                clip_text = ""
+                print(f"Clipboard error: {e}")
+
+            if clip_text and _looks_like_youtube_url(str(clip_text)):
+                # Run via converter to reuse yt-dlp + LLM pipeline
+                def run_youtube():
+                    try:
+                        path = self.converter.convert_clipboard_content() if self.converter else None
+                        if path:
+                            if self.config["show_notifications"]:
+                                self.notify("ePub Created", f"File saved: {os.path.basename(path)}")
+                            self._call_on_main_thread_once(0.1, self.update_recent_menu)
+                            if self.config["auto_open"]:
+                                subprocess.run(["open", path])
+                        else:
+                            self.notify("Conversion Error", "Could not create ePub from YouTube subtitles")
+                    except Exception as e:
+                        print(f"YouTube LLM conversion error: {e}")
+                        self.notify("LLM Error", str(e))
+
+                t = threading.Thread(target=run_youtube, daemon=True)
+                t.start()
+                return
+
+            # Resolve provider and API key
+            provider = str(self.config.get("llm_provider", "anthropic")).strip().lower()
+            if provider == "openrouter":
+                api_key = os.environ.get("OPENROUTER_API_KEY") or str(self.config.get("openrouter_api_key", ""))
+                model = str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")) or "anthropic/claude-sonnet-4.5"
+                if "/" not in model:
+                    # Map common Anthropic ids to OpenRouter equivalents
+                    if model.lower() in {"claude-4.5-sonnet", "claude-sonnet-4.5", "sonnet-4.5"}:
+                        model = "anthropic/claude-sonnet-4.5"
+            else:
+                api_key = os.environ.get("ANTHROPIC_API_KEY") or str(self.config.get("anthropic_api_key", ""))
+                model = str(self.config.get("anthropic_model", "claude-4.5-sonnet")) or "claude-4.5-sonnet"
+                if "/" in model:
+                    if model.lower() in {"anthropic/claude-sonnet-4.5"}:
+                        model = "claude-4.5-sonnet"
+            prompt = str(self.config.get("anthropic_prompt", ""))
+            max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+            temperature = float(self.config.get("anthropic_temperature", 0.2))
+            timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+            retries = int(self.config.get("anthropic_retry_count", 10))
+
+            if not api_key or not prompt:
+                self.notify("Anthropic", "Configure API Key and Prompt in Settings")
+                return
+
+            if not clip_text or not str(clip_text).strip():
+                self.notify("No Content", "Clipboard is empty or contains no text")
+                return
+
+            # Run LLM and conversion on a worker thread
+            def run():
+                try:
+                    try:
+                        from src.llm_anthropic import process_text, sanitize_first_line  # type: ignore
+                    except Exception:
+                        from llm_anthropic import process_text, sanitize_first_line  # type: ignore
+
+                    md = process_text(
+                        str(clip_text),
+                        api_key=str(api_key),
+                        model=str(model),
+                        system_prompt=str(prompt),
+                        max_tokens=int(max_tokens),
+                        temperature=float(temperature),
+                        timeout_s=int(timeout_s),
+                        retries=int(retries),
+                    )
+
+                    title = sanitize_first_line(md)
+                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=["anthropic"]) if self.converter else None
+
+                    if path:
+                        if self.config["show_notifications"]:
+                            self.notify("ePub Created", f"File saved: {os.path.basename(path)}")
+                        self._call_on_main_thread_once(0.1, self.update_recent_menu)
+                        if self.config["auto_open"]:
+                            subprocess.run(["open", path])
+                    else:
+                        self.notify("Conversion Error", "Could not create ePub from LLM output")
+                except Exception as e:
+                    print(f"LLM conversion error: {e}")
+                    self.notify("LLM Error", str(e))
+
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+        except Exception as e:
+            print(f"Error in convert_with_llm: {e}")
+            self.notify("Error", f"Failed to run LLM conversion: {e}")
 
     def open_folder(self, sender):
         """Open the ePubs output folder"""
@@ -381,8 +556,8 @@ class ClipToEpubApp(rumps.App):
                                     "ePub Created",
                                     f"File saved: {os.path.basename(filepath)}"
                                 )
-                            # Update recent menu regardless
-                            rumps.Timer(lambda _: self.update_recent_menu(), 0.1).start()
+                            # Update recent menu once on the main thread
+                            self._call_on_main_thread_once(0.1, self.update_recent_menu)
                             # Auto-open if configured
                             if self.config["auto_open"]:
                                 subprocess.run(["open", filepath])
@@ -400,6 +575,83 @@ class ClipToEpubApp(rumps.App):
             if self.config["show_notifications"]:
                 self.notify("Converter Started", f"Listening for {self.config['hotkey'].upper()}")
 
+    def _setup_llm_hotkey(self):
+        try:
+            from pynput import keyboard
+        except Exception as e:
+            print(f"Hotkey setup skipped (pynput missing): {e}")
+            return
+
+        # Guard against macOS constant missing in some PyObjC versions
+        try:
+            from Quartz import CGEventKeyboardGetUnicodeString  # type: ignore
+            _ = CGEventKeyboardGetUnicodeString
+        except Exception:
+            if self.config.get("show_notifications", True):
+                self.notify("LLM Hotkey Disabled", "macOS keyboard API not available; use the menu item")
+            print("Quartz constant CGEventKeyboardGetUnicodeString missing; disabling LLM hotkey listener")
+            return
+
+        def parse_hotkey_string(text):
+            try:
+                from pynput import keyboard as kb
+            except Exception:
+                return None
+            if not text:
+                return None
+            parts = [p.strip().lower() for p in str(text).split('+') if p.strip()]
+            combo = set()
+            for p in parts:
+                if p in ("ctrl", "control"):
+                    combo.add(kb.Key.ctrl)
+                elif p in ("cmd", "command", "meta"):
+                    combo.add(kb.Key.cmd)
+                elif p in ("alt", "option"):
+                    combo.add(kb.Key.alt)
+                elif p == "shift":
+                    combo.add(kb.Key.shift)
+                elif len(p) == 1:
+                    combo.add(kb.KeyCode.from_char(p))
+                elif p.startswith('f') and p[1:].isdigit():
+                    try:
+                        combo.add(getattr(kb.Key, p))
+                    except AttributeError:
+                        pass
+                elif p in ("space", "tab", "enter", "return", "backspace", "esc", "escape"):
+                    key_name = "esc" if p == "escape" else ("enter" if p == "return" else p)
+                    try:
+                        combo.add(getattr(kb.Key, key_name))
+                    except AttributeError:
+                        pass
+            return combo or None
+
+        self.llm_hotkey = parse_hotkey_string(self.config.get("anthropic_hotkey", "cmd+shift+l")) or set()
+
+        def on_press(key):
+            self.llm_current_keys.add(key)
+            if self.llm_hotkey and self.llm_hotkey.issubset(self.llm_current_keys):
+                self.convert_with_llm()
+
+        def on_release(key):
+            try:
+                self.llm_current_keys.remove(key)
+            except KeyError:
+                pass
+
+        try:
+            if self.llm_listener:
+                self.llm_listener.stop()
+            self.llm_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self.llm_listener.start()
+            if self.config.get("show_notifications", True):
+                try:
+                    label = self.config.get("anthropic_hotkey", "cmd+shift+l").upper()
+                    self.notify("LLM Hotkey", f"Listening for {label}")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"LLM hotkey listener error: {e}")
+
     def restart_converter(self, sender):
         """Restart the converter with new settings"""
         try:
@@ -414,6 +666,16 @@ class ClipToEpubApp(rumps.App):
             self.converter_thread = None
             self.start_converter()
 
+            # Restart LLM hotkey listener to apply any changes
+            try:
+                if self.llm_listener:
+                    self.llm_listener.stop()
+                    self.llm_listener = None
+                self.llm_current_keys = set()
+                self._setup_llm_hotkey()
+            except Exception as e:
+                print(f"Warning: Could not restart LLM hotkey: {e}")
+
             self.notify("Converter Restarted", "Settings applied successfully")
         except Exception as e:
             print(f"Error restarting converter: {e}")
@@ -424,6 +686,11 @@ class ClipToEpubApp(rumps.App):
         try:
             if self.converter:
                 self.converter.stop_listening()
+            if self.llm_listener:
+                try:
+                    self.llm_listener.stop()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Warning: Error stopping converter on quit: {e}")
             # Continue with quit even if converter cleanup fails
@@ -440,9 +707,10 @@ class ClipToEpubApp(rumps.App):
                     sound="default"
                 )
             except Exception as e:
-                print(f"Notification error: {e}")
-                # Fallback to rumps notification
-                rumps.notification(title, "", message)
+                # Avoid using rumps.notification before the NSApp loop starts,
+                # since triggering Cocoa notifications too early can crash
+                # (Abort trap: 6) on some macOS/PyObjC combos.
+                print(f"Notification error (suppressed fallback): {e}")
 
 
 if __name__ == "__main__":
