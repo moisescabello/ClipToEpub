@@ -60,9 +60,9 @@ python src/menubar_app.py
 - Quick toggles in the menu: Auto-open, Notifications, Recent Conversions, Settings
 
 LLM capture:
-- Menu item: "Convert with LLM".
-- Default LLM hotkey: Cmd + Shift + L.
-- Before first use, configure API Key and prompt in Settings (see below).
+- Menú: acciones de primer nivel “LLM - <Nombre>” para hasta 5 prompts definidos.
+- El hotkey LLM (Cmd + Shift + L) usa el prompt activo de Ajustes.
+- Antes del primer uso, configura la API, modelo y prompts en Ajustes.
 
 YouTube subtitles capture:
 - Copy a YouTube URL (youtube.com or youtu.be) to the clipboard, then use "Convert Now" or the convert hotkey.
@@ -81,9 +81,9 @@ python src\tray_app_windows.py
 - Click the tray icon for menu: Convert Now, Recent, Settings, toggles
 
 LLM capture:
-- Menu item: "Convert with LLM".
-- Default LLM hotkey: Ctrl + Shift + L.
-- Configure API Key and prompt in Settings.
+- Menú: acciones de primer nivel “LLM - <Nombre>” (hasta 5).
+- El hotkey LLM (Ctrl + Shift + L) usa el prompt activo.
+- Configura API, modelo y prompts en Ajustes.
 
 YouTube subtitles capture:
 - Copy a YouTube URL to the clipboard, then use "Convert Now" or the convert hotkey.
@@ -101,13 +101,16 @@ Hotkeys are configurable from Settings (Qt or Tk):
 - LLM capture hotkey (default: Cmd+Shift+L / Ctrl+Shift+L)
 
 LLM settings (persisted in the same config):
-- `anthropic_api_key`
-- `anthropic_model` (default: `anthropic/claude-sonnet-4.5`)
-- `anthropic_prompt` (system prompt, multiline)
-- `anthropic_max_tokens` (controls output length)
-- `anthropic_temperature`, `anthropic_timeout_seconds`, `anthropic_retry_count`
-- `llm_provider` (values: `anthropic` or `openrouter`, default: `openrouter`)
-- `openrouter_api_key` (only used if `llm_provider`=`openrouter`)
+- Global:
+  - `anthropic_api_key`
+  - `anthropic_model` (default: `anthropic/claude-sonnet-4.5`)
+  - `anthropic_max_tokens`, `anthropic_temperature`, `anthropic_timeout_seconds`, `anthropic_retry_count`
+  - `llm_provider` (`anthropic` | `openrouter`), `openrouter_api_key`
+  - `anthropic_prompt` (legacy; se mantiene sincronizado con el prompt activo)
+- Multi‑prompt:
+  - `llm_prompts` (lista de 5): cada elemento `{ name, text, overrides? }`
+  - `llm_prompt_active` (0..4) — usado por el hotkey LLM
+  - `llm_per_prompt_overrides` (bool) — si true, se aplican overrides por‑prompt
 
 You can also set `OPENROUTER_API_KEY` (default provider) or `ANTHROPIC_API_KEY` as environment variables; they override the stored keys at runtime.
 
@@ -173,13 +176,14 @@ ClipToEpub/
 - Advanced features (images/OCR, URL extraction, accumulator, cache, history) are built into the unified converter and can be enabled via flags.
 
 ### LLM Workflow
-1) Open Settings → LLM tab (Qt) or LLM section (Tk)
-2) Set your API Key: `OPENROUTER_API_KEY` (por defecto) o `ANTHROPIC_API_KEY` si cambias el proveedor
-3) Confirm model: `anthropic/claude-sonnet-4.5`
-4) Write your system prompt (the model outputs Markdown consumed by the converter)
-5) Set “Max Tokens” to fit your expected output size
-6) Use “Test Connection” to verify configuration
-7) Trigger LLM capture: menu item or hotkey (Cmd/Ctrl+Shift+L)
+1) Abrir Ajustes → pestaña/section LLM.
+2) Configura proveedor y API: `OPENROUTER_API_KEY` (por defecto) o `ANTHROPIC_API_KEY`.
+3) Confirma el modelo global (p. ej., `anthropic/claude-sonnet-4.5`).
+4) En “Custom Prompts”, rellena hasta 5 prompts con nombre y texto. Marca uno como “Use with Hotkey”.
+5) Si necesitas parámetros diferentes por prompt, activa “Enable per‑prompt overrides” y completa los campos de ese prompt.
+6) Ajusta “Max Tokens” global si no usas overrides o como valor por defecto.
+7) Pulsa “Test Connection” (usa el prompt activo) y verifica.
+8) Dispara el LLM: clic en “LLM - <Nombre>” o usa el hotkey (Cmd/Ctrl+Shift+L, usa el activo).
 
 Notes:
 - Timeout auto-adjusts with Max Tokens: approximately `tokens/50 + 30 s` (clamped 30–300 s). You can override it manually, and reset to the recommended value with the provided button.
@@ -190,6 +194,11 @@ Using Sonnet 4.5 (1M context) via OpenRouter
 - Set `llm_provider` to `openrouter` in Settings.
 - Export `OPENROUTER_API_KEY` or enter it in Settings. The app routes to OpenRouter automatically.
 - “Max Tokens” controls output length only; the 1M input context is provided by the model/provider.
+
+Per‑prompt overrides
+- Si `llm_per_prompt_overrides` está activo, cada prompt puede definir `model`, `max_tokens`, `temperature`, `timeout_seconds`, `retry_count`.
+- Los valores vacíos en overrides heredan de los globales.
+- El flujo de YouTube usa el prompt seleccionado (por clic) o el activo (por hotkey) y aplica sus overrides.
 
 Using Mistral Medium 3.1 via OpenRouter
 - Model id: `mistralai/mistral-medium-3.1` (128k context).

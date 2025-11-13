@@ -53,6 +53,16 @@ class ConfigWindow:
             # Provider selection and OpenRouter key
             "llm_provider": "openrouter",
             "openrouter_api_key": "",
+            # Multi-prompt configuration
+            "llm_prompts": [
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+            ],
+            "llm_prompt_active": 0,
+            "llm_per_prompt_overrides": False,
         }
 
         # Load current configuration
@@ -71,11 +81,17 @@ class ConfigWindow:
                     for key, value in self.default_config.items():
                         if key not in config:
                             config[key] = value
+                    # Normalize multi-prompt schema
+                    self._ensure_llm_prompts_struct(config)
                     return config
             except Exception as e:
                 print(f"Error loading config: {e}")
-                return self.default_config.copy()
-        return self.default_config.copy()
+                cfg = self.default_config.copy()
+                self._ensure_llm_prompts_struct(cfg)
+                return cfg
+        cfg = self.default_config.copy()
+        self._ensure_llm_prompts_struct(cfg)
+        return cfg
 
     def save_config(self):
         """Save configuration to file"""
@@ -106,7 +122,41 @@ class ConfigWindow:
             self.config["anthropic_api_key"] = self.anthropic_api_key_var.get().strip()
             self.config["openrouter_api_key"] = self.openrouter_api_key_var.get().strip()
             self.config["anthropic_model"] = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
-            self.config["anthropic_prompt"] = self.anthropic_prompt_text.get("1.0", tk.END).strip()
+            # Multi-prompt from UI
+            prompts = []
+            for i in range(5):
+                name = self.llm_name_vars[i].get().strip()
+                text = self.llm_text_widgets[i].get("1.0", tk.END).strip()
+                overrides = {}
+                if bool(self.llm_overrides_var.get()):
+                    model = self.llm_over_model_vars[i].get().strip()
+                    if model:
+                        overrides["model"] = model
+                    try:
+                        overrides["max_tokens"] = int(self.llm_over_maxtok_vars[i].get())
+                    except Exception:
+                        pass
+                    try:
+                        overrides["temperature"] = float(self.llm_over_temp_vars[i].get())
+                    except Exception:
+                        pass
+                    try:
+                        overrides["timeout_seconds"] = int(self.llm_over_timeout_vars[i].get())
+                    except Exception:
+                        pass
+                    try:
+                        overrides["retry_count"] = int(self.llm_over_retry_vars[i].get())
+                    except Exception:
+                        pass
+                prompts.append({"name": name, "text": text, "overrides": overrides})
+            self.config["llm_prompts"] = prompts
+            self.config["llm_prompt_active"] = int(self.llm_active_var.get())
+            self.config["llm_per_prompt_overrides"] = bool(self.llm_overrides_var.get())
+            # Legacy single prompt sync
+            try:
+                self.config["anthropic_prompt"] = prompts[self.config["llm_prompt_active"]]["text"]
+            except Exception:
+                self.config["anthropic_prompt"] = ""
             try:
                 self.config["anthropic_max_tokens"] = int(self.anthropic_max_tokens_var.get())
             except ValueError:
@@ -425,10 +475,75 @@ class ConfigWindow:
         self.anthropic_hotkey_var = tk.StringVar(value=self.config.get("anthropic_hotkey", self.default_config["anthropic_hotkey"]))
         ttk.Entry(llm_frame, textvariable=self.anthropic_hotkey_var, width=20).grid(row=2, column=1, sticky=tk.W)
 
-        ttk.Label(llm_frame, text="System Prompt:").grid(row=3, column=0, sticky=tk.NW, pady=5)
-        self.anthropic_prompt_text = tk.Text(llm_frame, height=6, width=48)
-        self.anthropic_prompt_text.insert("1.0", self.config.get("anthropic_prompt", ""))
-        self.anthropic_prompt_text.grid(row=3, column=1, sticky=tk.W)
+        # Custom prompts group
+        prompts_group = ttk.LabelFrame(llm_frame, text="Custom Prompts", padding="6")
+        prompts_group.grid(row=3, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=6)
+
+        # Toggle per-prompt overrides
+        self.llm_overrides_var = tk.IntVar(value=1 if self.config.get("llm_per_prompt_overrides", False) else 0)
+        ttk.Checkbutton(prompts_group, text="Enable per-prompt overrides", variable=self.llm_overrides_var, command=self._sync_prompt_overrides_state).grid(row=0, column=0, columnspan=4, sticky=tk.W)
+
+        # Active prompt radio and editors
+        self.llm_active_var = tk.IntVar(value=int(self.config.get("llm_prompt_active", 0)))
+        self.llm_name_vars = []
+        self.llm_text_widgets = []
+        self.llm_over_model_vars = []
+        self.llm_over_maxtok_vars = []
+        self.llm_over_temp_vars = []
+        self.llm_over_timeout_vars = []
+        self.llm_over_retry_vars = []
+
+        prompts = self.config.get("llm_prompts", [])
+        for i in range(5):
+            row_base = 1 + i * 3
+            item = prompts[i] if i < len(prompts) else {"name": "", "text": "", "overrides": {}}
+            # Row: radio + name
+            ttk.Radiobutton(prompts_group, text=f"Use with Hotkey", variable=self.llm_active_var, value=i).grid(row=row_base, column=0, sticky=tk.W)
+            name_var = tk.StringVar(value=item.get("name", ""))
+            self.llm_name_vars.append(name_var)
+            ttk.Label(prompts_group, text="Name:").grid(row=row_base, column=1, sticky=tk.W)
+            ttk.Entry(prompts_group, textvariable=name_var, width=24).grid(row=row_base, column=2, sticky=tk.W)
+
+            # Prompt text
+            ttk.Label(prompts_group, text="Prompt:").grid(row=row_base+1, column=1, sticky=tk.NW)
+            text_widget = tk.Text(prompts_group, height=4, width=48)
+            text_widget.insert("1.0", item.get("text", ""))
+            text_widget.grid(row=row_base+1, column=2, sticky=tk.W)
+            self.llm_text_widgets.append(text_widget)
+
+            # Overrides
+            ov = item.get("overrides", {}) or {}
+            ttk.Label(prompts_group, text="Overrides:").grid(row=row_base+2, column=1, sticky=tk.W)
+            over_frame = ttk.Frame(prompts_group)
+            over_frame.grid(row=row_base+2, column=2, sticky=tk.W)
+            # Model
+            ttk.Label(over_frame, text="Model").grid(row=0, column=0, sticky=tk.W)
+            over_model_var = tk.StringVar(value=ov.get("model", ""))
+            ttk.Entry(over_frame, textvariable=over_model_var, width=28).grid(row=0, column=1, sticky=tk.W)
+            # Max tokens
+            ttk.Label(over_frame, text="Max tokens").grid(row=0, column=2, sticky=tk.W, padx=(8,0))
+            over_maxtok_var = tk.StringVar(value=str(ov.get("max_tokens", "")))
+            ttk.Entry(over_frame, textvariable=over_maxtok_var, width=8).grid(row=0, column=3, sticky=tk.W)
+            # Temperature
+            ttk.Label(over_frame, text="Temp").grid(row=0, column=4, sticky=tk.W, padx=(8,0))
+            over_temp_var = tk.StringVar(value=str(ov.get("temperature", "")))
+            ttk.Entry(over_frame, textvariable=over_temp_var, width=6).grid(row=0, column=5, sticky=tk.W)
+            # Timeout
+            ttk.Label(over_frame, text="Timeout(s)").grid(row=0, column=6, sticky=tk.W, padx=(8,0))
+            over_timeout_var = tk.StringVar(value=str(ov.get("timeout_seconds", "")))
+            ttk.Entry(over_frame, textvariable=over_timeout_var, width=6).grid(row=0, column=7, sticky=tk.W)
+            # Retry
+            ttk.Label(over_frame, text="Retries").grid(row=0, column=8, sticky=tk.W, padx=(8,0))
+            over_retry_var = tk.StringVar(value=str(ov.get("retry_count", "")))
+            ttk.Entry(over_frame, textvariable=over_retry_var, width=6).grid(row=0, column=9, sticky=tk.W)
+
+            self.llm_over_model_vars.append(over_model_var)
+            self.llm_over_maxtok_vars.append(over_maxtok_var)
+            self.llm_over_temp_vars.append(over_temp_var)
+            self.llm_over_timeout_vars.append(over_timeout_var)
+            self.llm_over_retry_vars.append(over_retry_var)
+
+        self._sync_prompt_overrides_state()
 
         # Numeric params
         ttk.Label(llm_frame, text="Max Tokens:").grid(row=4, column=0, sticky=tk.W, pady=5)
@@ -476,7 +591,12 @@ class ConfigWindow:
                 else:
                     api_key = self.anthropic_api_key_var.get().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
                     model = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
-                prompt = self.anthropic_prompt_text.get("1.0", tk.END).strip() or "Return the input as Markdown."
+                # Use active prompt text
+                idx = int(self.llm_active_var.get() or 0)
+                if 0 <= idx < len(self.llm_text_widgets):
+                    prompt = self.llm_text_widgets[idx].get("1.0", tk.END).strip() or "Return the input as Markdown."
+                else:
+                    prompt = "Return the input as Markdown."
                 sample = "Test message from Clipboard to ePub"
                 md = process_text(sample, api_key=api_key, model=model, system_prompt=prompt, max_tokens=128, temperature=0.0, timeout_s=30, retries=2)
                 preview = "\n".join((md or "").strip().splitlines()[0:3])
@@ -616,7 +736,20 @@ class ConfigWindow:
             except Exception:
                 pass
             self.anthropic_model_var.set(self.default_config["anthropic_model"])
-            self.anthropic_prompt_text.delete("1.0", tk.END)
+            # Reset prompts
+            for i in range(5):
+                try:
+                    self.llm_name_vars[i].set("")
+                    self.llm_text_widgets[i].delete("1.0", tk.END)
+                    self.llm_over_model_vars[i].set("")
+                    self.llm_over_maxtok_vars[i].set("")
+                    self.llm_over_temp_vars[i].set("")
+                    self.llm_over_timeout_vars[i].set("")
+                    self.llm_over_retry_vars[i].set("")
+                except Exception:
+                    pass
+            self.llm_active_var.set(0)
+            self.llm_overrides_var.set(0)
             self.anthropic_max_tokens_var.set(str(self.default_config["anthropic_max_tokens"]))
             self.anthropic_temperature_var.set(str(self.default_config["anthropic_temperature"]))
             self.anthropic_timeout_seconds_var.set(str(self.default_config["anthropic_timeout_seconds"]))
@@ -716,6 +849,46 @@ class ConfigWindow:
             else:
                 out.append(p)
         return "+".join(out)
+
+    def _ensure_llm_prompts_struct(self, cfg: dict) -> None:
+        try:
+            prompts = cfg.get("llm_prompts")
+            if not isinstance(prompts, list):
+                prompts = []
+            norm = []
+            for i in range(5):
+                item = prompts[i] if i < len(prompts) else {}
+                name = str(item.get("name", "")) if isinstance(item, dict) else ""
+                text = str(item.get("text", "")) if isinstance(item, dict) else ""
+                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                norm.append({"name": name, "text": text, "overrides": overrides})
+            cfg["llm_prompts"] = norm
+            if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
+                cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
+                cfg.setdefault("llm_prompt_active", 0)
+            try:
+                idx = int(cfg.get("llm_prompt_active", 0))
+            except Exception:
+                idx = 0
+            if idx < 0 or idx > 4:
+                cfg["llm_prompt_active"] = 0
+            cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
+        except Exception:
+            cfg["llm_prompts"] = [
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+            ]
+            cfg["llm_prompt_active"] = 0
+            cfg["llm_per_prompt_overrides"] = False
+
+    def _sync_prompt_overrides_state(self):
+        # Tk simple UI: fields remain editable; checkbox acts as logical toggle captured on save
+        pass
 
     def run(self):
         """Run the configuration window"""

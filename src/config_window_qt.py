@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional, Union
 # Robust import for paths whether run from repo root or src/
 try:
     from src import paths as paths  # type: ignore
@@ -109,6 +110,16 @@ DEFAULTS = {
     # Provider selection and OpenRouter key
     "llm_provider": "openrouter",  # 'anthropic' | 'openrouter'
     "openrouter_api_key": "",
+    # Multi-prompt configuration
+    "llm_prompts": [
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+    ],
+    "llm_prompt_active": 0,
+    "llm_per_prompt_overrides": False,
 }
 
 
@@ -126,6 +137,47 @@ def list_available_styles() -> list[str]:
 
 
 if HAVE_QT:
+    def _ensure_llm_prompts_struct(cfg: dict) -> None:
+        try:
+            prompts = cfg.get("llm_prompts")
+            if not isinstance(prompts, list):
+                prompts = []
+            # normalize items
+            norm = []
+            for i in range(5):
+                item = prompts[i] if i < len(prompts) else {}
+                name = str(item.get("name", "")) if isinstance(item, dict) else ""
+                text = str(item.get("text", "")) if isinstance(item, dict) else ""
+                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                norm.append({"name": name, "text": text, "overrides": overrides})
+            cfg["llm_prompts"] = norm
+            # migrate from single prompt if needed
+            if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
+                cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
+                cfg.setdefault("llm_prompt_active", 0)
+            # sane active index
+            try:
+                idx = int(cfg.get("llm_prompt_active", 0))
+            except Exception:
+                idx = 0
+            if idx < 0 or idx > 4:
+                cfg["llm_prompt_active"] = 0
+            # default toggle
+            cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
+        except Exception:
+            # Hard reset on any schema error
+            cfg["llm_prompts"] = [
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+            ]
+            cfg["llm_prompt_active"] = 0
+            cfg["llm_per_prompt_overrides"] = False
+
     def _normalize_for_qt(seq_text: str) -> str:
         # Convert stored format like 'cmd+shift+e' to Qt-friendly 'Meta+Shift+E'
         if not seq_text:
@@ -160,11 +212,13 @@ if HAVE_QT:
         return "+".join(out)
 
     class SettingsDialog(QDialog):
-        def __init__(self, config: dict, parent: QWidget | None = None):
+        def __init__(self, config: dict, parent: Optional[QWidget] = None):
             super().__init__(parent)
             self.setWindowTitle("Clipboard to ePub – Settings")
             self.setMinimumSize(640, 520)
             self.config = config
+            # Ensure new schema keys
+            _ensure_llm_prompts_struct(self.config)
 
             # Window icon (optional)
             try:
@@ -419,14 +473,123 @@ if HAVE_QT:
             except Exception:
                 pass
 
-            # Prompt (multiline)
-            self.anthropic_prompt_edit = QTextEdit(self.config.get("anthropic_prompt", ""))
-            self.anthropic_prompt_edit.setPlaceholderText("System prompt to guide the model output (Markdown)")
-            form.addRow("System Prompt:", self.anthropic_prompt_edit)
-
             # Hotkey
             self.anthropic_hotkey_edit = QLineEdit(self.config.get("anthropic_hotkey", DEFAULTS["anthropic_hotkey"]))
             form.addRow("LLM Hotkey:", self.anthropic_hotkey_edit)
+
+            # Multi-prompt editor
+            prompts_group = QGroupBox("Custom Prompts")
+            prompts_layout = QVBoxLayout(prompts_group)
+            # Toggle for per-prompt overrides
+            self.llm_overrides_chk = QCheckBox("Enable per-prompt overrides")
+            self.llm_overrides_chk.setChecked(bool(self.config.get("llm_per_prompt_overrides", False)))
+            prompts_layout.addWidget(self.llm_overrides_chk)
+
+            # Radio group for active prompt selection
+            from PySide6.QtWidgets import QButtonGroup
+            self.prompt_radio_group = QButtonGroup(prompts_group)
+            self.prompt_radio_group.setExclusive(True)
+            self.prompt_widgets = []  # store widgets per prompt
+
+            prompts = list(self.config.get("llm_prompts", []))
+            try:
+                active_idx = int(self.config.get("llm_prompt_active", 0))
+            except Exception:
+                active_idx = 0
+
+            for i in range(5):
+                item = prompts[i] if i < len(prompts) else {"name": "", "text": "", "overrides": {}}
+                box = QGroupBox(f"Prompt {i+1}")
+                box_layout = QFormLayout(box)
+                name_edit = QLineEdit(str(item.get("name", "")))
+                radio = QCheckBox("Use with Hotkey")
+                # We simulate radio with a checkbox wired to a button group for consistent UI size
+                # but enforce exclusivity manually
+                # Better: use QRadioButton; keep checkbox API minimal change
+                try:
+                    from PySide6.QtWidgets import QRadioButton
+                    radio_btn = QRadioButton("Use with Hotkey")
+                    radio_btn.setChecked(i == active_idx)
+                    self.prompt_radio_group.addButton(radio_btn, i)
+                    box_layout.addRow(radio_btn)
+                    radio_widget = radio_btn
+                except Exception:
+                    radio.setChecked(i == active_idx)
+                    box_layout.addRow(radio)
+                    radio_widget = radio
+                box_layout.addRow("Name:", name_edit)
+                text_edit = QTextEdit(str(item.get("text", "")))
+                text_edit.setPlaceholderText("System prompt to guide the model output (Markdown)")
+                box_layout.addRow("Prompt:", text_edit)
+
+                # Overrides
+                overrides = item.get("overrides", {}) or {}
+                over_model = QLineEdit(str(overrides.get("model", "")))
+                over_maxtok = QSpinBox(); over_maxtok.setRange(1, 200000)
+                if "max_tokens" in overrides:
+                    over_maxtok.setValue(int(overrides.get("max_tokens", 2048)))
+                else:
+                    over_maxtok.setSpecialValueText("")
+                    over_maxtok.setValue(1)
+                    over_maxtok.clear()
+                over_temp = QDoubleSpinBox(); over_temp.setRange(0.0, 2.0); over_temp.setSingleStep(0.05)
+                if "temperature" in overrides:
+                    over_temp.setValue(float(overrides.get("temperature", 0.2)))
+                else:
+                    over_temp.setSpecialValueText("")
+                    over_temp.setValue(0.0)
+                    over_temp.clear()
+                over_timeout = QSpinBox(); over_timeout.setRange(1, 600)
+                if "timeout_seconds" in overrides:
+                    over_timeout.setValue(int(overrides.get("timeout_seconds", 60)))
+                else:
+                    over_timeout.setSpecialValueText("")
+                    over_timeout.setValue(1)
+                    over_timeout.clear()
+                over_retry = QSpinBox(); over_retry.setRange(0, 50)
+                if "retry_count" in overrides:
+                    over_retry.setValue(int(overrides.get("retry_count", 10)))
+                else:
+                    over_retry.setSpecialValueText("")
+                    over_retry.setValue(0)
+                    over_retry.clear()
+
+                # Group overrides in a small grid
+                over_row = QWidget(); over_layout = QGridLayout(over_row)
+                over_layout.addWidget(QLabel("Model:"), 0, 0); over_layout.addWidget(over_model, 0, 1)
+                over_layout.addWidget(QLabel("Max tokens:"), 1, 0); over_layout.addWidget(over_maxtok, 1, 1)
+                over_layout.addWidget(QLabel("Temperature:"), 2, 0); over_layout.addWidget(over_temp, 2, 1)
+                over_layout.addWidget(QLabel("Timeout (s):"), 3, 0); over_layout.addWidget(over_timeout, 3, 1)
+                over_layout.addWidget(QLabel("Retry count:"), 4, 0); over_layout.addWidget(over_retry, 4, 1)
+                box_layout.addRow(QLabel("Overrides (optional):"))
+                box_layout.addRow(over_row)
+
+                self.prompt_widgets.append({
+                    "name": name_edit,
+                    "text": text_edit,
+                    "radio": radio_widget,
+                    "over_model": over_model,
+                    "over_maxtok": over_maxtok,
+                    "over_temp": over_temp,
+                    "over_timeout": over_timeout,
+                    "over_retry": over_retry,
+                })
+                prompts_layout.addWidget(box)
+
+            def _sync_overrides_enabled(state: Union[bool, int]):
+                enabled = bool(state)
+                for w in self.prompt_widgets:
+                    for key in ("over_model", "over_maxtok", "over_temp", "over_timeout", "over_retry"):
+                        try:
+                            w[key].setEnabled(enabled)
+                        except Exception:
+                            pass
+
+            self.llm_overrides_chk.toggled.connect(lambda checked: _sync_overrides_enabled(checked))
+            # initialize enabled state
+            _sync_overrides_enabled(self.llm_overrides_chk.isChecked())
+
+            form.addRow(prompts_group)
 
             # Numeric params
             self.anthropic_max_tokens_spin = QSpinBox()
@@ -509,7 +672,20 @@ if HAVE_QT:
                     else:
                         api_key = self.anthropic_key_edit.text().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
                         model = self.anthropic_model_edit.text().strip() or DEFAULTS["anthropic_model"]
-                    prompt = self.anthropic_prompt_edit.toPlainText().strip() or "Return the input as Markdown."
+                    # Use active prompt text for test
+                    active = 0
+                    try:
+                        cid = int(self.prompt_radio_group.checkedId())
+                        active = cid if cid >= 0 else int(self.config.get("llm_prompt_active", 0))
+                    except Exception:
+                        try:
+                            active = int(self.config.get("llm_prompt_active", 0))
+                        except Exception:
+                            active = 0
+                    if 0 <= active < len(self.prompt_widgets):
+                        prompt = self.prompt_widgets[active]["text"].toPlainText().strip() or "Return the input as Markdown."
+                    else:
+                        prompt = "Return the input as Markdown."
                     sample = "Test message from Clipboard to ePub"
                     md = process_text(sample, api_key=api_key, model=model, system_prompt=prompt, max_tokens=128, temperature=0.0, timeout_s=30, retries=2)
                     preview = (md or "").strip().splitlines()[0:3]
@@ -574,13 +750,60 @@ if HAVE_QT:
                 "anthropic_api_key": self.anthropic_key_edit.text().strip(),
                 "openrouter_api_key": self.openrouter_key_edit.text().strip(),
                 "anthropic_model": self.anthropic_model_edit.text().strip() or DEFAULTS["anthropic_model"],
-                "anthropic_prompt": self.anthropic_prompt_edit.toPlainText().strip(),
                 "anthropic_max_tokens": int(self.anthropic_max_tokens_spin.value()),
                 "anthropic_temperature": float(self.anthropic_temperature_spin.value()),
                 "anthropic_timeout_seconds": int(self.anthropic_timeout_spin.value()),
                 "anthropic_retry_count": int(self.anthropic_retry_spin.value()),
                 "anthropic_hotkey": self.anthropic_hotkey_edit.text().strip() or DEFAULTS["anthropic_hotkey"],
             }
+
+            # Collect prompts
+            prompts: list[dict] = []
+            active_idx = 0
+            # Determine active from button group if possible
+            try:
+                active_idx = int(self.prompt_radio_group.checkedId())
+            except Exception:
+                # Fallback: keep previous
+                active_idx = int(self.config.get("llm_prompt_active", 0))
+            for i, w in enumerate(self.prompt_widgets):
+                name = w["name"].text().strip()
+                text = w["text"].toPlainText().strip()
+                overrides: dict = {}
+                if self.llm_overrides_chk.isChecked():
+                    if w["over_model"].text().strip():
+                        overrides["model"] = w["over_model"].text().strip()
+                    # Always include numeric overrides when toggle is active
+                    try:
+                        val = int(w["over_maxtok"].value())
+                        overrides["max_tokens"] = val
+                    except Exception:
+                        pass
+                    try:
+                        overrides["temperature"] = float(w["over_temp"].value())
+                    except Exception:
+                        pass
+                    try:
+                        val = int(w["over_timeout"].value())
+                        overrides["timeout_seconds"] = val
+                    except Exception:
+                        pass
+                    try:
+                        val = int(w["over_retry"].value())
+                        overrides["retry_count"] = val
+                    except Exception:
+                        pass
+                prompts.append({"name": name, "text": text, "overrides": overrides})
+
+            cfg["llm_prompts"] = prompts
+            cfg["llm_prompt_active"] = max(0, min(4, active_idx))
+            cfg["llm_per_prompt_overrides"] = bool(self.llm_overrides_chk.isChecked())
+            # Keep legacy single prompt in sync with active prompt
+            try:
+                active_prompt_text = prompts[cfg["llm_prompt_active"]]["text"] if prompts else ""
+            except Exception:
+                active_prompt_text = ""
+            cfg["anthropic_prompt"] = str(active_prompt_text or "")
 
             ok = save_config(cfg)
             if ok:

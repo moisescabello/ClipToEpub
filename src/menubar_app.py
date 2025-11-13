@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 ClipToEpub - Menu Bar Application
 Unified converter backend
@@ -15,6 +16,7 @@ except ImportError:
         pass
 
 import rumps
+import asyncio
 import os
 import sys
 import json
@@ -72,6 +74,8 @@ class ClipToEpubApp(rumps.App):
             "auto_open": False,
             "show_notifications": True,
             "chapter_words": 5000,
+            # Concurrency
+            "max_async_workers": 3,
             # YouTube subtitles
             "youtube_lang_1": "en",
             "youtube_lang_2": "es",
@@ -90,10 +94,21 @@ class ClipToEpubApp(rumps.App):
             # Provider selection and OpenRouter key
             "llm_provider": "openrouter",
             "openrouter_api_key": "",
+            # Multi-prompt configuration
+            "llm_prompts": [
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+            ],
+            "llm_prompt_active": 0,
+            "llm_per_prompt_overrides": False,
         }
 
         # Load existing configuration
         self.load_config()
+        self._ensure_llm_config()
 
         # Initialize converter
         self.converter = None
@@ -115,6 +130,15 @@ class ClipToEpubApp(rumps.App):
             self._call_on_main_thread_once(0.3, self._setup_llm_hotkey)
         except Exception as e:
             print(f"LLM hotkey schedule error: {e}")
+
+        # Spinner/activity in menubar
+        self._spinner_frames = ['|', '/', '-', '\\']
+        self._spinner_idx = 0
+        self._activity_timer = rumps.Timer(self._activity_tick, 0.3)
+        try:
+            self._activity_timer.start()
+        except Exception as e:
+            print(f"Activity timer error: {e}")
 
     def _call_on_main_thread_once(self, delay_seconds, func):
         """Schedule a one-shot call on the rumps main loop thread."""
@@ -140,6 +164,44 @@ class ClipToEpubApp(rumps.App):
                     self.config.update(saved_config)
             except Exception as e:
                 print(f"Error loading config: {e}")
+        # Normalize new keys
+        self._ensure_llm_config()
+
+    def _ensure_llm_config(self):
+        try:
+            prompts = self.config.get("llm_prompts")
+            if not isinstance(prompts, list):
+                prompts = []
+            norm = []
+            for i in range(5):
+                item = prompts[i] if i < len(prompts) else {}
+                name = str(item.get("name", "")) if isinstance(item, dict) else ""
+                text = str(item.get("text", "")) if isinstance(item, dict) else ""
+                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                norm.append({"name": name, "text": text, "overrides": overrides})
+            self.config["llm_prompts"] = norm
+            if not any(p.get("text") for p in norm) and self.config.get("anthropic_prompt"):
+                self.config["llm_prompts"][0]["text"] = str(self.config.get("anthropic_prompt", ""))
+                self.config.setdefault("llm_prompt_active", 0)
+            try:
+                idx = int(self.config.get("llm_prompt_active", 0))
+            except Exception:
+                idx = 0
+            if idx < 0 or idx > 4:
+                self.config["llm_prompt_active"] = 0
+            self.config["llm_per_prompt_overrides"] = bool(self.config.get("llm_per_prompt_overrides", False))
+        except Exception:
+            self.config["llm_prompts"] = [
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+                {"name": "", "text": "", "overrides": {}},
+            ]
+            self.config["llm_prompt_active"] = 0
+            self.config["llm_per_prompt_overrides"] = False
 
     def save_config(self):
         """Save configuration to file"""
@@ -201,6 +263,7 @@ class ClipToEpubApp(rumps.App):
                 default_language=self.config["language"],
                 default_style=self.config["style"],
                 chapter_words=self.config["chapter_words"],
+                max_async_workers=int(self.config.get("max_async_workers", 3)),
                 hotkey_combo=hotkey_combo,
                 # YouTube + LLM config
                 youtube_langs=[
@@ -226,9 +289,25 @@ class ClipToEpubApp(rumps.App):
     def setup_menu(self):
         """Setup menu items"""
         # Convert now button
+        self.activity_item = rumps.MenuItem("Activity: Idle", callback=None)
+        # Build LLM items as first-level entries
+        llm_items: list = []
+        try:
+            for i, p in enumerate(self.config.get("llm_prompts", [])):
+                text = (p or {}).get("text", "") if isinstance(p, dict) else ""
+                if not str(text).strip():
+                    continue
+                name = (p or {}).get("name", "") if isinstance(p, dict) else ""
+                label = name.strip() or f"Prompt {i+1}"
+                item = rumps.MenuItem(f"LLM - {label}", callback=(lambda sender, idx=i: self.convert_with_llm(None, idx)))
+                llm_items.append(item)
+        except Exception as e:
+            print(f"LLM menu build error: {e}")
+
         self.menu = [
             rumps.MenuItem("Convert Now", callback=self.convert_now),
-            rumps.MenuItem("Convert with LLM", callback=self.convert_with_llm),
+            *llm_items,
+            self.activity_item,
             None,  # Separator
             rumps.MenuItem("Open ePubs Folder", callback=self.open_folder),
             rumps.MenuItem("Recent Conversions", callback=None),
@@ -318,7 +397,7 @@ class ClipToEpubApp(rumps.App):
             print(f"Error during conversion: {e}")
             self.notify("Conversion Error", str(e))
 
-    def convert_with_llm(self, sender=None):
+    def convert_with_llm(self, sender=None, prompt_index=None):
         """Send clipboard text through Anthropic and convert returned Markdown to ePub."""
         try:
             # If clipboard is a YouTube URL, delegate to converter's YouTube flow
@@ -344,10 +423,34 @@ class ClipToEpubApp(rumps.App):
                 print(f"Clipboard error: {e}")
 
             if clip_text and _looks_like_youtube_url(str(clip_text)):
-                # Run via converter to reuse yt-dlp + LLM pipeline
+                # Run via converter to reuse yt-dlp + LLM pipeline, passing the captured URL
+                captured_url = str(clip_text)
+
+                # Build selected prompt overrides
+                def _selected_prompt_and_overrides() -> tuple[str, dict]:
+                    prompts = self.config.get("llm_prompts", [])
+                    use_idx = int(self.config.get("llm_prompt_active", 0)) if prompt_index is None else int(prompt_index)
+                    if use_idx < 0 or use_idx >= len(prompts):
+                        use_idx = 0
+                    item = prompts[use_idx] if isinstance(prompts, list) else {}
+                    prompt_text = str((item or {}).get("text", ""))
+                    overrides = {}
+                    if bool(self.config.get("llm_per_prompt_overrides", False)):
+                        ov = (item or {}).get("overrides", {}) or {}
+                        if isinstance(ov, dict):
+                            overrides = ov.copy()
+                    # Always include prompt text as override for YouTube flow
+                    overrides["system_prompt"] = prompt_text
+                    return prompt_text, overrides
+
                 def run_youtube():
                     try:
-                        path = self.converter.convert_clipboard_content() if self.converter else None
+                        if not self.converter:
+                            self.notify("Error", "Converter not initialized")
+                            return
+                        # Ejecutar la ruta asíncrona con overrides del prompt seleccionado
+                        _prompt_text, overrides = _selected_prompt_and_overrides()
+                        path = asyncio.run(self.converter.convert_clipboard_content_async(clipboard_content=captured_url, llm_overrides=overrides))
                         if path:
                             if self.config["show_notifications"]:
                                 self.notify("ePub Created", f"File saved: {os.path.basename(path)}")
@@ -379,11 +482,43 @@ class ClipToEpubApp(rumps.App):
                 if "/" in model:
                     if model.lower() in {"anthropic/claude-sonnet-4.5"}:
                         model = "claude-4.5-sonnet"
-            prompt = str(self.config.get("anthropic_prompt", ""))
-            max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-            temperature = float(self.config.get("anthropic_temperature", 0.2))
-            timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-            retries = int(self.config.get("anthropic_retry_count", 10))
+            # Select prompt + optional per-prompt overrides
+            prompts = self.config.get("llm_prompts", [])
+            use_idx = int(self.config.get("llm_prompt_active", 0)) if prompt_index is None else int(prompt_index)
+            if use_idx < 0 or use_idx >= len(prompts):
+                use_idx = 0
+            item = prompts[use_idx] if isinstance(prompts, list) else {}
+            prompt = str((item or {}).get("text", "")) or str(self.config.get("anthropic_prompt", ""))
+            if bool(self.config.get("llm_per_prompt_overrides", False)):
+                ov = (item or {}).get("overrides", {}) or {}
+                if isinstance(ov, dict):
+                    model = str(ov.get("model", model) or model)
+                    try:
+                        max_tokens = int(ov.get("max_tokens", self.config.get("anthropic_max_tokens", 2048)))
+                    except Exception:
+                        max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                    try:
+                        temperature = float(ov.get("temperature", self.config.get("anthropic_temperature", 0.2)))
+                    except Exception:
+                        temperature = float(self.config.get("anthropic_temperature", 0.2))
+                    try:
+                        timeout_s = int(ov.get("timeout_seconds", self.config.get("anthropic_timeout_seconds", 60)))
+                    except Exception:
+                        timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                    try:
+                        retries = int(ov.get("retry_count", self.config.get("anthropic_retry_count", 10)))
+                    except Exception:
+                        retries = int(self.config.get("anthropic_retry_count", 10))
+                else:
+                    max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                    temperature = float(self.config.get("anthropic_temperature", 0.2))
+                    timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                    retries = int(self.config.get("anthropic_retry_count", 10))
+            else:
+                max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                temperature = float(self.config.get("anthropic_temperature", 0.2))
+                timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                retries = int(self.config.get("anthropic_retry_count", 10))
 
             if not api_key or not prompt:
                 self.notify("Anthropic", "Configure API Key and Prompt in Settings")
@@ -519,6 +654,11 @@ class ClipToEpubApp(rumps.App):
                 self.load_config()
                 # Restart converter with new settings
                 self.restart_converter(None)
+                # Rebuild menu to reflect LLM prompt changes
+                try:
+                    self.setup_menu()
+                except Exception as e:
+                    print(f"Warning: could not rebuild menu: {e}")
             else:
                 if result:
                     print(f"Config window error: {result.stderr}")
@@ -574,6 +714,13 @@ class ClipToEpubApp(rumps.App):
 
             if self.config["show_notifications"]:
                 self.notify("Converter Started", f"Listening for {self.config['hotkey'].upper()}")
+
+        # Attach activity callback for immediate UI refresh
+        try:
+            if self.converter:
+                self.converter.activity_callback = lambda snap: self._call_on_main_thread_once(0.05, self._refresh_activity)
+        except Exception:
+            pass
 
     def _setup_llm_hotkey(self):
         try:
@@ -711,6 +858,37 @@ class ClipToEpubApp(rumps.App):
                 # since triggering Cocoa notifications too early can crash
                 # (Abort trap: 6) on some macOS/PyObjC combos.
                 print(f"Notification error (suppressed fallback): {e}")
+
+    # ---- Activity UI ----
+    def _activity_tick(self, _=None):
+        try:
+            if not self.converter:
+                self.title = None
+                if hasattr(self, 'activity_item') and self.activity_item:
+                    self.activity_item.title = "Activity: Idle"
+                return
+            counts = self.converter.get_activity()
+            active = int(counts.get('active', 0))
+            queued = int(counts.get('queued', 0))
+            if active > 0 or queued > 0:
+                frame = self._spinner_frames[self._spinner_idx % len(self._spinner_frames)]
+                self._spinner_idx = (self._spinner_idx + 1) % 1000000
+                # Show spinner next to icon for feedback during long LLM/subtitle runs
+                self.title = frame
+                if self.activity_item:
+                    self.activity_item.title = f"Activity: {active} running, {queued} queued"
+            else:
+                # Clear spinner/title when idle
+                self.title = None
+                if self.activity_item:
+                    self.activity_item.title = "Activity: Idle"
+        except Exception as e:
+            # Avoid crashing timer on minor errors
+            print(f"Activity tick error: {e}")
+
+    def _refresh_activity(self):
+        # One-shot refresh triggered from converter callback
+        self._activity_tick()
 
 
 if __name__ == "__main__":

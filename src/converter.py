@@ -104,6 +104,7 @@ class ClipboardToEpubConverter:
         enable_edit_window: bool = False,
         hotkey_combo: Optional[set] = None,
         max_async_workers: int = 3,
+        max_concurrent_conversions: Optional[int] = None,
         # YouTube subtitles + LLM
         youtube_langs: Optional[List[str]] = None,
         youtube_prefer_native: bool = True,
@@ -129,6 +130,7 @@ class ClipboardToEpubConverter:
         self.enable_history = enable_history
         self.enable_edit_window = enable_edit_window
         self.max_async_workers = max_async_workers
+        self.max_concurrent_conversions = int(max_concurrent_conversions or max_async_workers)
 
         # Hotkeys
         self.convert_hotkey = hotkey_combo or DEFAULT_CONVERT_HOTKEY
@@ -176,9 +178,14 @@ class ClipboardToEpubConverter:
         # Callbacks
         self.conversion_callback = None
         self.error_callback = None
+        self.activity_callback = None
 
-        # Async executor
+        # Concurrency primitives and async executor
         self.executor = None
+        self._conversion_semaphore = threading.BoundedSemaphore(value=self.max_concurrent_conversions)
+        self._activity_lock = threading.Lock()
+        self._active_conversions = 0
+        self._queued_conversions = 0
 
         self._ensure_output_dir()
         self._setup_async()
@@ -198,7 +205,33 @@ class ClipboardToEpubConverter:
             logger.error(f"Failed to setup async executor: {e}")
 
     # --------- Public API ---------
-    def convert_clipboard_content(self, use_accumulator: bool = False) -> Optional[str]:
+    def get_activity(self) -> Dict[str, int]:
+        """Return a snapshot of current conversion activity."""
+        with self._activity_lock:
+            return {
+                "active": int(self._active_conversions),
+                "queued": int(self._queued_conversions),
+                "capacity": int(self.max_concurrent_conversions),
+            }
+
+    def _emit_activity(self) -> None:
+        cb = self.activity_callback
+        if cb:
+            try:
+                cb(self.get_activity())
+            except Exception:
+                pass
+
+    def _inc_queued(self, delta: int) -> None:
+        with self._activity_lock:
+            self._queued_conversions = max(0, self._queued_conversions + int(delta))
+        self._emit_activity()
+
+    def _inc_active(self, delta: int) -> None:
+        with self._activity_lock:
+            self._active_conversions = max(0, self._active_conversions + int(delta))
+        self._emit_activity()
+    def convert_clipboard_content(self, use_accumulator: bool = False, llm_overrides: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Synchronous wrapper around the async conversion method."""
         try:
             # If an event loop is already running, run the async conversion in a worker thread
@@ -215,7 +248,7 @@ class ClipboardToEpubConverter:
                 def _runner():
                     try:
                         result["path"] = asyncio.run(
-                            self.convert_clipboard_content_async(use_accumulator=use_accumulator)
+                            self.convert_clipboard_content_async(use_accumulator=use_accumulator, llm_overrides=llm_overrides)
                         )
                     except BaseException as e:  # propagate fatal exceptions
                         error["e"] = e
@@ -230,7 +263,7 @@ class ClipboardToEpubConverter:
                     raise error["e"]
                 return result["path"]
 
-            return asyncio.run(self.convert_clipboard_content_async(use_accumulator=use_accumulator))
+            return asyncio.run(self.convert_clipboard_content_async(use_accumulator=use_accumulator, llm_overrides=llm_overrides))
         except Exception as e:
             logger.error(f"Error in sync conversion: {e}")
             return None
@@ -271,7 +304,14 @@ class ClipboardToEpubConverter:
             logger.error(f"Error converting provided text: {e}")
             return None
 
-    async def convert_text_to_epub_async(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None) -> Optional[str]:
+    async def convert_text_to_epub_async(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None, *, acquire_conversion_slot: bool = True) -> Optional[str]:
+        acquired = False
+        if acquire_conversion_slot:
+            self._inc_queued(1)
+            await self._acquire_conversion_slot_async()
+            self._inc_queued(-1)
+            self._inc_active(1)
+            acquired = True
         try:
             if not text or not text.strip():
                 logger.warning("No text provided for direct conversion")
@@ -307,6 +347,10 @@ class ClipboardToEpubConverter:
         except Exception as e:
             logger.error(f"Error in direct text conversion: {e}", exc_info=True)
             return None
+        finally:
+            if acquired:
+                self._inc_active(-1)
+                self._release_conversion_slot()
 
     def start_listening(self) -> None:
         if self.listening:
@@ -363,107 +407,115 @@ class ClipboardToEpubConverter:
 
     # --------- Internals / Async ---------
     async def convert_clipboard_content_async(
-        self, clipboard_content: Optional[str] = None, use_accumulator: bool = False
+        self, clipboard_content: Optional[str] = None, use_accumulator: bool = False, llm_overrides: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
+        self._inc_queued(1)
+        await self._acquire_conversion_slot_async()
+        self._inc_queued(-1)
+        self._inc_active(1)
         try:
-            # Source content and metadata
-            # Priority: Images → URLs/Markdown/HTML/RTF/Plain (via processor)
-            if not use_accumulator and clipboard_content is None:
-                # Give priority to images currently in the clipboard
-                try:
-                    maybe_image = self.image_handler.detect_image_in_clipboard()
-                except Exception:
-                    maybe_image = None
-                if maybe_image is not None:
-                    logger.info("Image detected in clipboard (priority path)")
-                    return await self._convert_image_to_epub_async(maybe_image)
-            if use_accumulator:
-                content = self.accumulator.combine_clips()
-                metadata = self.accumulator.get_combined_metadata()
-                if not content:
-                    logger.warning("No accumulated clips to convert")
-                    return None
-            else:
-                content = clipboard_content or await self._get_clipboard_content_async()
-                metadata = {}
-
-            if not content or not content.strip():
-                # Fallback: check for image if no textual content
-                try:
-                    image = self.image_handler.detect_image_in_clipboard()
-                except Exception:
-                    image = None
-                if image is not None:
-                    logger.info("Image detected in clipboard (fallback path)")
-                    return await self._convert_image_to_epub_async(image)
-                logger.warning("No content to convert")
-                return None
-
-            # Optional edit window first so user changes affect processing and caching
-            if self.enable_edit_window and not use_accumulator:
-                edited_content, edited_meta = await self._show_edit_window_async(content, metadata)
-                if edited_content:
-                    content = edited_content
-                    metadata.update(edited_meta)
-                else:
-                    logger.info("User cancelled conversion")
-                    return None
-
-            # Build processing options possibly overridden by metadata (from accumulator or editor)
-            words_per_chapter = self.chapter_words
-            if "chapter_words" in metadata:
-                try:
-                    words_per_chapter = int(metadata.get("chapter_words"))  # type: ignore[arg-type]
-                except Exception:
-                    words_per_chapter = self.chapter_words
-            css_template = str(metadata.get("style", self.default_style))
-            options = {"words_per_chapter": words_per_chapter, "css_template": css_template}
-
-            # Cache check (after potential edits so we don't skip user's changes)
-            if self.cache:
-                cached = self.cache.get(content, options)
-                if cached:
-                    logger.info("Using cached conversion result")
-                    return await self._create_epub_from_cached_async(cached)
-
-            # Special case: If content is a bare YouTube URL, fetch subtitles and route via LLM
             try:
-                if not use_accumulator and isinstance(content, str) and self._looks_like_youtube_url(content.strip()):
-                    logger.info("YouTube URL detected; attempting subtitles + LLM pipeline")
-                    path = await self._handle_youtube_url_async(content.strip())
-                    if path:
-                        return path
+                # Source content and metadata
+                # Priority: Images → URLs/Markdown/HTML/RTF/Plain (via processor)
+                if not use_accumulator and clipboard_content is None:
+                    # Give priority to images currently in the clipboard
+                    try:
+                        maybe_image = self.image_handler.detect_image_in_clipboard()
+                    except Exception:
+                        maybe_image = None
+                    if maybe_image is not None:
+                        logger.info("Image detected in clipboard (priority path)")
+                        return await self._convert_image_to_epub_async(maybe_image)
+                if use_accumulator:
+                    content = self.accumulator.combine_clips()
+                    metadata = self.accumulator.get_combined_metadata()
+                    if not content:
+                        logger.warning("No accumulated clips to convert")
+                        return None
+                else:
+                    content = clipboard_content or await self._get_clipboard_content_async()
+                    metadata = {}
+
+                if not content or not content.strip():
+                    # Fallback: check for image if no textual content
+                    try:
+                        image = self.image_handler.detect_image_in_clipboard()
+                    except Exception:
+                        image = None
+                    if image is not None:
+                        logger.info("Image detected in clipboard (fallback path)")
+                        return await self._convert_image_to_epub_async(image)
+                    logger.warning("No content to convert")
+                    return None
+
+                # Optional edit window first so user changes affect processing and caching
+                if self.enable_edit_window and not use_accumulator:
+                    edited_content, edited_meta = await self._show_edit_window_async(content, metadata)
+                    if edited_content:
+                        content = edited_content
+                        metadata.update(edited_meta)
+                    else:
+                        logger.info("User cancelled conversion")
+                        return None
+
+                # Build processing options possibly overridden by metadata (from accumulator or editor)
+                words_per_chapter = self.chapter_words
+                if "chapter_words" in metadata:
+                    try:
+                        words_per_chapter = int(metadata.get("chapter_words"))  # type: ignore[arg-type]
+                    except Exception:
+                        words_per_chapter = self.chapter_words
+                css_template = str(metadata.get("style", self.default_style))
+                options = {"words_per_chapter": words_per_chapter, "css_template": css_template}
+
+                # Cache check (after potential edits so we don't skip user's changes)
+                if self.cache:
+                    cached = self.cache.get(content, options)
+                    if cached:
+                        logger.info("Using cached conversion result")
+                        return await self._create_epub_from_cached_async(cached)
+
+                # Special case: If content is a bare YouTube URL, fetch subtitles and route via LLM
+                try:
+                    if not use_accumulator and isinstance(content, str) and self._looks_like_youtube_url(content.strip()):
+                        logger.info("YouTube URL detected; attempting subtitles + LLM pipeline")
+                        path = await self._handle_youtube_url_async(content.strip(), llm_overrides=llm_overrides or {})
+                        if path:
+                            return path
+                except Exception as e:
+                    logger.warning(f"YouTube path failed; falling back to generic processing: {e}")
+
+                # Process content (thread pool)
+                loop = asyncio.get_running_loop()
+                processed = await loop.run_in_executor(self.executor, process_clipboard_content, content, options)
+
+                # Create ePub
+                path = await self._create_epub_async(processed, metadata)
+
+                # Cache store
+                if self.cache and path:
+                    self.cache.put(content, options, processed)
+
+                # History
+                if self.history and path:
+                    hist_meta = {
+                        "title": processed.get("metadata", {}).get("title", "Untitled"),
+                        "format": processed.get("format", "unknown"),
+                        "chapters": len(processed.get("chapters", [])),
+                        "size": Path(path).stat().st_size,
+                        "author": self.default_author,
+                    }
+                    self.history.add_entry(path, hist_meta)
+
+                return path
             except Exception as e:
-                logger.warning(f"YouTube path failed; falling back to generic processing: {e}")
-
-            # Process content (thread pool)
-            loop = asyncio.get_running_loop()
-            processed = await loop.run_in_executor(self.executor, process_clipboard_content, content, options)
-
-            # Create ePub
-            path = await self._create_epub_async(processed, metadata)
-
-            # Cache store
-            if self.cache and path:
-                self.cache.put(content, options, processed)
-
-            # History
-            if self.history and path:
-                hist_meta = {
-                    "title": processed.get("metadata", {}).get("title", "Untitled"),
-                    "format": processed.get("format", "unknown"),
-                    "chapters": len(processed.get("chapters", [])),
-                    "size": Path(path).stat().st_size,
-                    "author": self.default_author,
-                }
-                self.history.add_entry(path, hist_meta)
-
-            return path
-        except Exception as e:
-            logger.error(f"Error in async conversion: {e}", exc_info=True)
-            if self.error_callback:
-                self.error_callback(str(e))
-            return None
+                logger.error(f"Error in async conversion: {e}", exc_info=True)
+                if self.error_callback:
+                    self.error_callback(str(e))
+                return None
+        finally:
+            self._inc_active(-1)
+            self._release_conversion_slot()
 
     async def _get_clipboard_content_async(self) -> str:
         loop = asyncio.get_running_loop()
@@ -485,7 +537,7 @@ class ClipboardToEpubConverter:
         except Exception:
             return False
 
-    async def _handle_youtube_url_async(self, url: str) -> Optional[str]:
+    async def _handle_youtube_url_async(self, url: str, llm_overrides: Optional[Dict[str, Any]] = None) -> Optional[str]:
         # Download subtitles with language + native/auto preference
         loop = asyncio.get_running_loop()
         try:
@@ -499,9 +551,12 @@ class ClipboardToEpubConverter:
             return None
 
         # If LLM prompt not configured, fall back to direct conversion of transcript
-        if not (self.anthropic_prompt and (self.anthropic_api_key or self.openrouter_api_key)):
+        # Check if we have either global prompt or override prompt and some API key configured
+        have_prompt = bool((llm_overrides or {}).get("system_prompt") or self.anthropic_prompt)
+        have_key = bool(self.anthropic_api_key or self.openrouter_api_key)
+        if not (have_prompt and have_key):
             logger.info("LLM not configured; converting raw subtitles")
-            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"])  # type: ignore[arg-type]
+            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"], acquire_conversion_slot=False)  # type: ignore[arg-type]
 
         # Process via LLM
         try:
@@ -509,6 +564,7 @@ class ClipboardToEpubConverter:
                 self.executor,
                 self._llm_process_blocking,
                 transcript_text,
+                llm_overrides or {},
             )
         except Exception as e:
             logger.error(f"LLM processing failed: {e}")
@@ -516,7 +572,7 @@ class ClipboardToEpubConverter:
 
         if not md or not md.strip():
             logger.warning("Empty LLM result; converting transcript directly")
-            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"])  # type: ignore[arg-type]
+            return await self.convert_text_to_epub_async(transcript_text, suggested_title="YouTube Transcript", tags=["youtube", "subtitles"], acquire_conversion_slot=False)  # type: ignore[arg-type]
 
         # Title from first line
         try:
@@ -528,7 +584,21 @@ class ClipboardToEpubConverter:
         except Exception:
             suggested_title = "LLM Result"
 
-        return await self.convert_text_to_epub_async(md, suggested_title=suggested_title, tags=["anthropic", "youtube"])  # type: ignore[arg-type]
+        return await self.convert_text_to_epub_async(md, suggested_title=suggested_title, tags=["anthropic", "youtube"], acquire_conversion_slot=False)  # type: ignore[arg-type]
+
+    async def _acquire_conversion_slot_async(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            # Offload potentially blocking semaphore acquire to a worker thread
+            await loop.run_in_executor(None, self._conversion_semaphore.acquire)
+        except Exception as e:
+            logger.error(f"Failed to acquire conversion slot: {e}")
+
+    def _release_conversion_slot(self) -> None:
+        try:
+            self._conversion_semaphore.release()
+        except Exception:
+            pass
 
     def _download_youtube_subtitles_blocking(self, url: str) -> Optional[str]:
         import subprocess
@@ -682,7 +752,7 @@ class ClipboardToEpubConverter:
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
-    def _llm_process_blocking(self, text: str) -> str:
+    def _llm_process_blocking(self, text: str, llm_overrides: Optional[Dict[str, Any]] = None) -> str:
         # Route based on provider + available key
         provider = (self.llm_provider or "anthropic").strip().lower()
         try:
@@ -697,16 +767,23 @@ class ClipboardToEpubConverter:
             api_key = (self.anthropic_api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
             # Accept both Anthropic id and OpenRouter id; process_text handles mapping
             model = self.anthropic_model or "claude-4.5-sonnet"
+        ov = llm_overrides or {}
+        sys_prompt = str(ov.get("system_prompt", self.anthropic_prompt or ""))
+        model = str(ov.get("model", model or "")) or model
+        max_tokens = int(ov.get("max_tokens", self.anthropic_max_tokens or 2048))
+        temperature = float(ov.get("temperature", self.anthropic_temperature or 0.2))
+        timeout_s = int(ov.get("timeout_seconds", self.anthropic_timeout_seconds or 60))
+        retries = int(ov.get("retry_count", self.anthropic_retry_count or 10))
 
         return process_text(
             str(text or ""),
             api_key=str(api_key or ""),
             model=str(model or "claude-4.5-sonnet"),
-            system_prompt=str(self.anthropic_prompt or ""),
-            max_tokens=int(self.anthropic_max_tokens or 2048),
-            temperature=float(self.anthropic_temperature or 0.2),
-            timeout_s=int(self.anthropic_timeout_seconds or 60),
-            retries=int(self.anthropic_retry_count or 10),
+            system_prompt=str(sys_prompt or ""),
+            max_tokens=int(max_tokens),
+            temperature=float(temperature),
+            timeout_s=int(timeout_s),
+            retries=int(retries),
         )
 
     async def _convert_image_to_epub_async(self, image: Image.Image) -> Optional[str]:
@@ -848,7 +925,8 @@ class ClipboardToEpubConverter:
             book.add_item(epub.EpubNav())
 
             safe_title = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in title)[:100]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Incluir microsegundos para evitar colisiones en ejecuciones paralelas
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{safe_title}_{timestamp}_cached.epub"
             filepath = self.output_dir / filename
 
@@ -972,7 +1050,8 @@ class ClipboardToEpubConverter:
             book.add_item(epub.EpubNav())
 
             safe_title = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in title)[:100]
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Incluir microsegundos para evitar colisiones en ejecuciones paralelas
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{safe_title}_{timestamp}.epub"
             filepath = self.output_dir / filename
 

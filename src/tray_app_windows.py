@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import threading
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -51,6 +52,8 @@ DEFAULT_CONFIG = {
     "auto_open": False,
     "show_notifications": True,
     "chapter_words": 5000,
+    # Concurrency
+    "max_async_workers": 3,
     # YouTube subtitles
     "youtube_lang_1": "en",
     "youtube_lang_2": "es",
@@ -69,6 +72,16 @@ DEFAULT_CONFIG = {
     # Provider selection and OpenRouter key
     "llm_provider": "openrouter",
     "openrouter_api_key": "",
+    # Multi-prompt configuration
+    "llm_prompts": [
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+        {"name": "", "text": "", "overrides": {}},
+    ],
+    "llm_prompt_active": 0,
+    "llm_per_prompt_overrides": False,
 }
 
 
@@ -83,11 +96,50 @@ def load_config() -> dict:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
             for k, v in DEFAULT_CONFIG.items():
                 data.setdefault(k, v)
+            _ensure_llm_config(data)
             return data
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             print(f"Warning: Could not load config: {e}")
             return DEFAULT_CONFIG.copy()
-    return DEFAULT_CONFIG.copy()
+    data = DEFAULT_CONFIG.copy()
+    _ensure_llm_config(data)
+    return data
+
+def _ensure_llm_config(cfg: dict) -> None:
+    try:
+        prompts = cfg.get("llm_prompts")
+        if not isinstance(prompts, list):
+            prompts = []
+        norm = []
+        for i in range(5):
+            item = prompts[i] if i < len(prompts) else {}
+            name = str(item.get("name", "")) if isinstance(item, dict) else ""
+            text = str(item.get("text", "")) if isinstance(item, dict) else ""
+            overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            norm.append({"name": name, "text": text, "overrides": overrides})
+        cfg["llm_prompts"] = norm
+        if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
+            cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
+            cfg.setdefault("llm_prompt_active", 0)
+        try:
+            idx = int(cfg.get("llm_prompt_active", 0))
+        except Exception:
+            idx = 0
+        if idx < 0 or idx > 4:
+            cfg["llm_prompt_active"] = 0
+        cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
+    except Exception:
+        cfg["llm_prompts"] = [
+            {"name": "", "text": "", "overrides": {}},
+            {"name": "", "text": "", "overrides": {}},
+            {"name": "", "text": "", "overrides": {}},
+            {"name": "", "text": "", "overrides": {}},
+            {"name": "", "text": "", "overrides": {}},
+        ]
+        cfg["llm_prompt_active"] = 0
+        cfg["llm_per_prompt_overrides"] = False
 
 
 def save_config(cfg: dict) -> None:
@@ -168,10 +220,22 @@ class WindowsTrayApp:
         self._recent_timer.timeout.connect(self._refresh_recent_menu)
         self._recent_timer.start()
 
+        # Activity timer/UI
+        self._activity_timer = QTimer()
+        self._activity_timer.setInterval(300)
+        self._activity_timer.timeout.connect(self._activity_tick)
+        self._activity_timer.start()
+
         # LLM hotkey listener
         self.llm_listener = None
         self.llm_current_keys = set()
         self._setup_llm_hotkey()
+        # Hook activity callback for on-change refresh
+        try:
+            if self.converter:
+                self.converter.activity_callback = lambda snap: QTimer.singleShot(50, self._refresh_activity)
+        except Exception:
+            pass
 
     # ---- Converter ----
     def _build_converter(self):
@@ -183,6 +247,7 @@ class WindowsTrayApp:
                 default_language=self.config["language"],
                 default_style=self.config["style"],
                 chapter_words=self.config["chapter_words"],
+                max_async_workers=int(self.config.get("max_async_workers", 3)),
                 hotkey_combo=hotkey_combo,
                 # YouTube + LLM config
                 youtube_langs=[
@@ -241,10 +306,24 @@ class WindowsTrayApp:
         action_convert.triggered.connect(self._convert_now)
         self.menu.addAction(action_convert)
 
-        # Convert with LLM
-        action_convert_llm = QAction("Convert with LLM", self.menu)
-        action_convert_llm.triggered.connect(self._convert_with_llm)
-        self.menu.addAction(action_convert_llm)
+        # LLM prompts as first-level actions
+        try:
+            for i, p in enumerate(self.config.get("llm_prompts", [])):
+                text = (p or {}).get("text", "") if isinstance(p, dict) else ""
+                if not str(text).strip():
+                    continue
+                name = (p or {}).get("name", "") if isinstance(p, dict) else ""
+                label = name.strip() or f"Prompt {i+1}"
+                act = QAction(f"LLM - {label}", self.menu)
+                act.triggered.connect((lambda _=False, idx=i: self._convert_with_llm(idx)))
+                self.menu.addAction(act)
+        except Exception as e:
+            print(f"LLM menu build error: {e}")
+
+        # Activity label (read-only)
+        self.activity_action = QAction("Activity: Idle", self.menu)
+        self.activity_action.setEnabled(False)
+        self.menu.addAction(self.activity_action)
 
         self.menu.addSeparator()
 
@@ -367,7 +446,7 @@ class WindowsTrayApp:
             elif tk_path.exists():
                 res = run(tk_path)
 
-            # Reload config and rebuild converter
+            # Reload config and rebuild converter and menu
             self.config = load_config()
             self._build_converter()
             self._build_menu()
@@ -393,7 +472,7 @@ class WindowsTrayApp:
         QApplication.quit()
 
     # ---- LLM ----
-    def _convert_with_llm(self):
+    def _convert_with_llm(self, index: Optional[int] = None):
         if not self.converter:
             return
         try:
@@ -415,9 +494,25 @@ class WindowsTrayApp:
             import pyperclip
             clip_text = pyperclip.paste() or ""
             if clip_text and _looks_like_youtube_url(str(clip_text)):
+                captured_url = str(clip_text)
                 def run_youtube():
                     try:
-                        path = self.converter.convert_clipboard_content() if self.converter else None
+                        if not self.converter:
+                            return
+                        # Resolve selected prompt + overrides
+                        prompts = self.config.get("llm_prompts", [])
+                        use_idx = int(self.config.get("llm_prompt_active", 0)) if index is None else int(index)
+                        if use_idx < 0 or use_idx >= len(prompts):
+                            use_idx = 0
+                        item = prompts[use_idx] if isinstance(prompts, list) else {}
+                        overrides = {}
+                        if bool(self.config.get("llm_per_prompt_overrides", False)):
+                            ov = (item or {}).get("overrides", {}) or {}
+                            if isinstance(ov, dict):
+                                overrides = ov.copy()
+                        overrides["system_prompt"] = str((item or {}).get("text", ""))
+                        # Run async path with captured URL to avoid clipboard races
+                        path = asyncio.run(self.converter.convert_clipboard_content_async(clipboard_content=captured_url, llm_overrides=overrides))
                         if path:
                             if self.config.get("show_notifications", True):
                                 self.tray.showMessage("ePub Created", os.path.basename(path))
@@ -447,11 +542,42 @@ class WindowsTrayApp:
                 if "/" in model:
                     if model.lower() in {"anthropic/claude-sonnet-4.5"}:
                         model = "claude-4.5-sonnet"
-            prompt = str(self.config.get("anthropic_prompt", ""))
-            max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-            temperature = float(self.config.get("anthropic_temperature", 0.2))
-            timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-            retries = int(self.config.get("anthropic_retry_count", 10))
+            prompts = self.config.get("llm_prompts", [])
+            use_idx = int(self.config.get("llm_prompt_active", 0)) if index is None else int(index)
+            if use_idx < 0 or use_idx >= len(prompts):
+                use_idx = 0
+            item = prompts[use_idx] if isinstance(prompts, list) else {}
+            prompt = str((item or {}).get("text", "")) or str(self.config.get("anthropic_prompt", ""))
+            if bool(self.config.get("llm_per_prompt_overrides", False)):
+                ov = (item or {}).get("overrides", {}) or {}
+                if isinstance(ov, dict):
+                    model = str(ov.get("model", model) or model)
+                    try:
+                        max_tokens = int(ov.get("max_tokens", self.config.get("anthropic_max_tokens", 2048)))
+                    except Exception:
+                        max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                    try:
+                        temperature = float(ov.get("temperature", self.config.get("anthropic_temperature", 0.2)))
+                    except Exception:
+                        temperature = float(self.config.get("anthropic_temperature", 0.2))
+                    try:
+                        timeout_s = int(ov.get("timeout_seconds", self.config.get("anthropic_timeout_seconds", 60)))
+                    except Exception:
+                        timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                    try:
+                        retries = int(ov.get("retry_count", self.config.get("anthropic_retry_count", 10)))
+                    except Exception:
+                        retries = int(self.config.get("anthropic_retry_count", 10))
+                else:
+                    max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                    temperature = float(self.config.get("anthropic_temperature", 0.2))
+                    timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                    retries = int(self.config.get("anthropic_retry_count", 10))
+            else:
+                max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
+                temperature = float(self.config.get("anthropic_temperature", 0.2))
+                timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
+                retries = int(self.config.get("anthropic_retry_count", 10))
 
             if not api_key or not prompt:
                 self.tray.showMessage("Anthropic", "Configure API Key and Prompt in Settings")
@@ -527,6 +653,31 @@ class WindowsTrayApp:
             self.llm_listener.start()
         except Exception as e:
             print(f"LLM hotkey listener error: {e}")
+
+    # ---- Activity UI ----
+    def _activity_tick(self):
+        try:
+            if not self.converter:
+                self.tray.setToolTip("ClipToEpub: Idle")
+                if hasattr(self, 'activity_action') and self.activity_action:
+                    self.activity_action.setText("Activity: Idle")
+                return
+            snap = self.converter.get_activity()
+            active = int(snap.get('active', 0))
+            queued = int(snap.get('queued', 0))
+            if active > 0 or queued > 0:
+                self.tray.setToolTip(f"ClipToEpub: {active} running, {queued} queued")
+                if self.activity_action:
+                    self.activity_action.setText(f"Activity: {active} running, {queued} queued")
+            else:
+                self.tray.setToolTip("ClipToEpub: Idle")
+                if self.activity_action:
+                    self.activity_action.setText("Activity: Idle")
+        except Exception:
+            pass
+
+    def _refresh_activity(self):
+        self._activity_tick()
 
 
 def main():
