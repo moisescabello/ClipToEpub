@@ -1,10 +1,12 @@
 # ClipToEpub
 
-One step: Press a single global hotkey and it automatically converts the clipboard content to ePub and saves it to the designated folder. Detects images, rich text formatting, and markdown. Optionally, process the clipboard text with an LLM (Anthropic Claude Sonnet 4.5) and convert the model output to ePub in one go.
+One simple step: press a global hotkey and it automatically converts the clipboard content to ePub and saves it to the designated folder. It detects images, rich text formatting, and markup. Optionally, process the clipboard text with an LLM and convert the model output to ePub in one go.
 
-<img src="https://github.com/user-attachments/assets/9e70c1fa-d2f4-4f0c-b1b2-fd9f78cb8cdc" width="200"/>   
-<br>
-<img src="https://github.com/user-attachments/assets/e08a04c8-e349-4bda-882a-683494ea5d11" width="600"/>
+And more thing! If a YouTube URL is in the clipboard, it will download the subtitles, process them with the LLM, and convert them to ePub.
+
+<img src="https://github.com/user-attachments/assets/d1bdb063-5ecf-42f8-9fb5-6383f0a65f10" width="200"/>   
+<img src="https://github.com/user-attachments/assets/8c07f964-c341-425c-bc3b-8b5b470c074c" width="400"/>
+<img src="https://github.com/user-attachments/assets/7bb425e2-c124-4104-aae2-5ba3f45d9e06" width="400"/>
 
 
 
