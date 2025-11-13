@@ -57,6 +57,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ClipboardToEpub")
 
+# Allow overriding the sync wrapper timeout (in seconds) via env var
+# to accommodate long Newspaper3k fetches or large conversions.
+SYNC_JOIN_TIMEOUT = int(os.environ.get("CLIPTOEPUB_SYNC_TIMEOUT", "120"))
+
 
 def _platform_hotkeys():
     """Return default hotkey sets for the current platform.
@@ -255,9 +259,9 @@ class ClipboardToEpubConverter:
 
                 t = threading.Thread(target=_runner, daemon=True)
                 t.start()
-                t.join(timeout=30)
+                t.join(timeout=SYNC_JOIN_TIMEOUT)
                 if t.is_alive():
-                    logger.error("Conversion timed out after 30 seconds")
+                    logger.error(f"Conversion timed out after {SYNC_JOIN_TIMEOUT} seconds")
                     return None
                 if error["e"] is not None:
                     raise error["e"]
@@ -291,9 +295,9 @@ class ClipboardToEpubConverter:
 
                 t = threading.Thread(target=_runner, daemon=True)
                 t.start()
-                t.join(timeout=30)
+                t.join(timeout=SYNC_JOIN_TIMEOUT)
                 if t.is_alive():
-                    logger.error("Conversion timed out after 30 seconds")
+                    logger.error(f"Conversion timed out after {SYNC_JOIN_TIMEOUT} seconds")
                     return None
                 if error["e"] is not None:
                     raise error["e"]
@@ -885,37 +889,57 @@ class ClipboardToEpubConverter:
             # Optional static TOC page if provided in cached data
             if toc_html:
                 toc_page = epub.EpubHtml(uid="toc", file_name="toc.xhtml", title="Table of Contents")
-                page_content = toc_html.strip()
+                page_content = (toc_html or "").strip()
+                # Strip NULs which break XML encoders
+                if "\x00" in page_content:
+                    page_content = page_content.replace("\x00", "")
                 if not (page_content.lower().startswith("<!doctype") or page_content.lower().startswith("<html")):
                     page_content = f"""<!DOCTYPE html>
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
     <title>Table of Contents</title>
     <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
-</head>
+    <meta charset=\"UTF-8\"/>
+    </head>
 <body>
     {page_content}
 </body>
 </html>"""
-                toc_page.content = page_content
+                # Ensure bytes content for ebooklib
+                toc_page.content = page_content.encode("utf-8", errors="ignore")
                 book.add_item(toc_page)
                 epub_chapters.append(toc_page)
-            for idx, chapter in enumerate(chapters, 1):
-                html = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
-                chapter_content = chapter["content"]
-                if not (chapter_content.strip().startswith("<!DOCTYPE") or chapter_content.strip().startswith("<html")):
-                    chapter_content = f"""<!DOCTYPE html>
+            # Helper to normalize chapter XHTML and ensure UTF-8 bytes
+            def _ensure_xhtml_bytes(doc_title: str, content: str) -> bytes:
+                txt = (content or "").strip()
+                if "\x00" in txt:
+                    txt = txt.replace("\x00", "")
+                inner = txt
+                try:
+                    from bs4 import BeautifulSoup  # type: ignore
+                    soup = BeautifulSoup(txt, 'html.parser')
+                    if soup.body:
+                        inner = soup.body.decode_contents() or inner
+                except Exception:
+                    pass
+                wrapped = f"""
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
-    <title>{chapter['title']}</title>
+    <meta charset=\"UTF-8\"/>
+    <title>{doc_title}</title>
     <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
 </head>
 <body>
-    <h1>{chapter['title']}</h1>
-    {chapter_content}
+    <h1>{doc_title}</h1>
+    {inner}
 </body>
 </html>"""
-                html.content = chapter_content
+                return wrapped.encode("utf-8", errors="ignore")
+
+            for idx, chapter in enumerate(chapters, 1):
+                html = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
+                chapter_content = str(chapter.get("content", ""))
+                html.content = _ensure_xhtml_bytes(str(chapter.get("title", f"Chapter {idx}")), chapter_content)
                 book.add_item(html)
                 epub_chapters.append(html)
 

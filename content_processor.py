@@ -745,7 +745,7 @@ class CSSTemplates:
         """Get a modern CSS template with better typography"""
         return """
         /* Modern ePub CSS Template */
-        @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Open+Sans:wght@400;600;700&display=swap');
+        /* Note: Remote font imports removed for ePub compatibility */
 
         body {
             font-family: 'Merriweather', Georgia, serif;

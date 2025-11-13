@@ -127,7 +127,10 @@ class UpdateChecker:
 
         try:
             # Make API request
-            headers = {'Accept': 'application/vnd.github.v3+json'}
+            headers = {
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': f'{self.APP_NAME}/{self.CURRENT_VERSION}'
+            }
             response = requests.get(self.GITHUB_API_URL, headers=headers, timeout=5)
 
             if response.status_code == 200:

@@ -757,6 +757,27 @@ if HAVE_QT:
                 "anthropic_hotkey": self.anthropic_hotkey_edit.text().strip() or DEFAULTS["anthropic_hotkey"],
             }
 
+            # Normalize model/provider coherence to avoid auth/API mismatch
+            try:
+                provider = (cfg.get("llm_provider", "openrouter") or "").strip().lower()
+                model = (cfg.get("anthropic_model", "") or "").strip()
+                if provider == "anthropic":
+                    # Anthropic provider expects Anthropic model ids without slash
+                    if "/" in model:
+                        # Map common OpenRouter id to Anthropic alias; fallback to default alias
+                        if model.lower() == "anthropic/claude-sonnet-4.5":
+                            cfg["anthropic_model"] = "claude-4.5-sonnet"
+                        else:
+                            cfg["anthropic_model"] = "claude-4.5-sonnet"
+                elif provider == "openrouter":
+                    # OpenRouter expects provider/model format
+                    if "/" not in model:
+                        ml = model.lower()
+                        if ml in {"claude-4.5-sonnet", "sonnet-4.5", "claude-sonnet-4.5"}:
+                            cfg["anthropic_model"] = "anthropic/claude-sonnet-4.5"
+            except Exception:
+                pass
+
             # Collect prompts
             prompts: list[dict] = []
             active_idx = 0

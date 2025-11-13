@@ -175,6 +175,24 @@ class ConfigWindow:
                 self.config["anthropic_retry_count"] = 10
             self.config["anthropic_hotkey"] = (self.anthropic_hotkey_var.get().strip() or self.default_config["anthropic_hotkey"]).lower()
 
+            # Normalize model/provider coherence to avoid auth/API mismatch
+            try:
+                provider = (self.config.get("llm_provider", "openrouter") or "").strip().lower()
+                model = (self.config.get("anthropic_model", "") or "").strip()
+                if provider == "anthropic":
+                    if "/" in model:
+                        if model.lower() == "anthropic/claude-sonnet-4.5":
+                            self.config["anthropic_model"] = "claude-4.5-sonnet"
+                        else:
+                            self.config["anthropic_model"] = "claude-4.5-sonnet"
+                elif provider == "openrouter":
+                    if "/" not in model:
+                        ml = model.lower()
+                        if ml in {"claude-4.5-sonnet", "sonnet-4.5", "claude-sonnet-4.5"}:
+                            self.config["anthropic_model"] = "anthropic/claude-sonnet-4.5"
+            except Exception:
+                pass
+
             # YouTube settings
             def _to_code(val: str, default: str) -> str:
                 s = (val or "").strip()
