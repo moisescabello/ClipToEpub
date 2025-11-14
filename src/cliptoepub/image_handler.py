@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Image Handler Module for Clipboard to ePub
 Handles image detection, optimization, and embedding in ePub files
@@ -6,11 +7,16 @@ Handles image detection, optimization, and embedding in ePub files
 
 import os
 import io
+import sys
 import base64
 import hashlib
 import logging
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Tuple, Any
+
 from PIL import Image, ImageOps
 import pytesseract
 from datetime import datetime
@@ -51,67 +57,124 @@ class ImageHandler:
             PIL Image object if clipboard contains image, None otherwise
         """
         try:
-            # Try to get image from clipboard using PIL
-            # Note: This requires platform-specific implementation
-            # For macOS, we'll use a workaround with pasteboard
+            if sys.platform == "darwin":
+                return self._detect_image_macos_clipboard()
+            if sys.platform.startswith("win"):
+                return self._detect_image_windows_clipboard()
 
-            import subprocess
-            import tempfile
+            # For other platforms, we currently do not support image clipboard capture
+            logger.debug("Clipboard image detection is not supported on this platform")
+            return None
+        except Exception as e:
+            logger.debug(f"No image detected in clipboard: {e}", exc_info=True)
+            return None
 
-            # Use osascript to check clipboard type
-            script = '''
-            on run
-                set theType to (clipboard info)
-                return theType as string
-            end run
-            '''
-
+    def _detect_image_macos_clipboard(self) -> Optional[Image.Image]:
+        """
+        macOS-specific clipboard image detection using AppleScript and pngpaste.
+        """
+        # Use osascript to check clipboard type first
+        script = '''
+        on run
+            set theType to (clipboard info)
+            return theType as string
+        end run
+        '''
+        try:
             result = subprocess.run(
                 ['osascript', '-e', script],
                 capture_output=True,
-                text=True
+                text=True,
+                check=False,
             )
+        except FileNotFoundError:
+            logger.warning("osascript not found; cannot inspect macOS clipboard for images")
+            return None
 
-            if 'TIFF' in result.stdout or 'PNG' in result.stdout:
-                tmp_path = None
+        info = (result.stdout or "").upper()
+        if "TIFF" not in info and "PNG" not in info:
+            logger.debug("macOS clipboard does not contain TIFF/PNG image data")
+            return None
+
+        tmp_path: Optional[str] = None
+        try:
+            # Save clipboard image to temp file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+
+            # Try to coerce clipboard to PNG to improve compatibility
+            try:
+                subprocess.run(
+                    ['osascript', '-e',
+                     'set the clipboard to (read (the clipboard as «class PNGf») as «class PNGf»)'],
+                    capture_output=True,
+                    check=False,
+                )
+            except FileNotFoundError:
+                logger.warning("osascript not found while attempting PNG coercion for clipboard image")
+                return None
+
+            # Try using pngpaste if available
+            pngpaste_path = shutil.which('pngpaste')
+            if not pngpaste_path:
+                logger.info("pngpaste not found; install it (e.g., 'brew install pngpaste') for more reliable image capture from the clipboard")
+                return None
+
+            try:
+                subprocess.run([pngpaste_path, tmp_path], check=True)
+                # Fully load image into memory so temp file can be removed
+                with Image.open(tmp_path) as img:
+                    img.load()
+                    image = img.copy()
+                return image
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"pngpaste failed to read clipboard image: {e}")
+            except Exception as e:
+                logger.warning(f"Unable to open image written by pngpaste: {e}")
+
+            return None
+        finally:
+            # Ensure temp file is removed on any failure path
+            if tmp_path and os.path.exists(tmp_path):
                 try:
-                    # Save clipboard image to temp file
-                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                        tmp_path = tmp.name
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
-                    # Try to coerce clipboard to PNG to improve compatibility
-                    subprocess.run(
-                        ['osascript', '-e',
-                         'set the clipboard to (read (the clipboard as «class PNGf») as «class PNGf»)'],
-                        capture_output=True
-                    )
-
-                    # Try using pngpaste if available
-                    try:
-                        subprocess.run(['pngpaste', tmp_path], check=True)
-                        # Fully load image into memory so temp file can be removed
-                        with Image.open(tmp_path) as img:
-                            img.load()
-                            image = img.copy()
-                        os.unlink(tmp_path)
-                        tmp_path = None
-                        return image
-                    except (subprocess.CalledProcessError, FileNotFoundError):
-                        # pngpaste not available; fall through
-                        pass
-                finally:
-                    # Ensure temp file is removed on any failure path
-                    if tmp_path and os.path.exists(tmp_path):
-                        try:
-                            os.unlink(tmp_path)
-                        except OSError:
-                            pass
-
-            return None
-
+    def _detect_image_windows_clipboard(self) -> Optional[Image.Image]:
+        """
+        Windows-specific clipboard image detection using Pillow's ImageGrab.
+        """
+        try:
+            from PIL import ImageGrab  # type: ignore
         except Exception as e:
-            logger.debug(f"No image detected in clipboard: {e}")
+            logger.debug(f"ImageGrab not available for Windows clipboard detection: {e}")
             return None
+
+        try:
+            data = ImageGrab.grabclipboard()
+        except Exception as e:
+            logger.debug(f"ImageGrab.grabclipboard() failed: {e}")
+            return None
+
+        if isinstance(data, Image.Image):
+            return data
+
+        # Sometimes the clipboard contains file paths instead of a raw image
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str) and os.path.isfile(item):
+                    suffix = Path(item).suffix.lower()
+                    if suffix in self.SUPPORTED_FORMATS:
+                        try:
+                            with Image.open(item) as img:
+                                img.load()
+                                return img.copy()
+                        except Exception as e:
+                            logger.debug(f"Failed to open image file from clipboard list '{item}': {e}")
+
+        logger.debug("No image data found in Windows clipboard")
+        return None
 
     def optimize_image(self, image: Image.Image, format: str = 'JPEG') -> Tuple[bytes, str]:
         """

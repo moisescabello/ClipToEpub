@@ -13,11 +13,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional, Union
-# Robust import for paths whether run from repo root or src/
-try:
-    from src import paths as paths  # type: ignore
-except Exception:
-    import paths  # type: ignore
+from . import paths as paths
+from .llm_config import ensure_llm_config, sync_legacy_prompt
+import tempfile
 
 
 def load_config(defaults: dict) -> dict:
@@ -137,46 +135,6 @@ def list_available_styles() -> list[str]:
 
 
 if HAVE_QT:
-    def _ensure_llm_prompts_struct(cfg: dict) -> None:
-        try:
-            prompts = cfg.get("llm_prompts")
-            if not isinstance(prompts, list):
-                prompts = []
-            # normalize items
-            norm = []
-            for i in range(5):
-                item = prompts[i] if i < len(prompts) else {}
-                name = str(item.get("name", "")) if isinstance(item, dict) else ""
-                text = str(item.get("text", "")) if isinstance(item, dict) else ""
-                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                norm.append({"name": name, "text": text, "overrides": overrides})
-            cfg["llm_prompts"] = norm
-            # migrate from single prompt if needed
-            if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
-                cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
-                cfg.setdefault("llm_prompt_active", 0)
-            # sane active index
-            try:
-                idx = int(cfg.get("llm_prompt_active", 0))
-            except Exception:
-                idx = 0
-            if idx < 0 or idx > 4:
-                cfg["llm_prompt_active"] = 0
-            # default toggle
-            cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
-        except Exception:
-            # Hard reset on any schema error
-            cfg["llm_prompts"] = [
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-            ]
-            cfg["llm_prompt_active"] = 0
-            cfg["llm_per_prompt_overrides"] = False
 
     def _normalize_for_qt(seq_text: str) -> str:
         # Convert stored format like 'cmd+shift+e' to Qt-friendly 'Meta+Shift+E'
@@ -218,7 +176,7 @@ if HAVE_QT:
             self.setMinimumSize(640, 520)
             self.config = config
             # Ensure new schema keys
-            _ensure_llm_prompts_struct(self.config)
+            ensure_llm_config(self.config)
 
             # Window icon (optional)
             try:
@@ -247,6 +205,44 @@ if HAVE_QT:
             self.button_box.accepted.connect(self.on_save)
             self.button_box.rejected.connect(self.reject)
             layout.addWidget(self.button_box)
+
+        # ---- Validation helpers ----
+        def _validate_before_save(self, cfg: dict) -> list[str]:
+            warnings: list[str] = []
+            # Provider/API key presence
+            try:
+                provider = (cfg.get("llm_provider", "openrouter") or "").strip().lower()
+                if provider == "anthropic":
+                    if not (cfg.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")):
+                        warnings.append("Anthropic provider selected but no API key configured.")
+                elif provider == "openrouter":
+                    if not (cfg.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")):
+                        warnings.append("OpenRouter provider selected but no API key configured.")
+            except Exception:
+                pass
+
+            # Output directory write check (best-effort)
+            try:
+                out_dir = Path(cfg.get("output_directory") or "").expanduser()
+                out_dir.mkdir(parents=True, exist_ok=True)
+                # try temp creation to verify writability
+                with tempfile.NamedTemporaryFile(dir=str(out_dir), prefix="cte_chk_", delete=True):
+                    pass
+            except Exception:
+                warnings.append("Output directory may not be writable. ePubs could fail to save.")
+
+            # Active prompt content (optional)
+            try:
+                if bool(cfg.get("llm_prompts")):
+                    active = int(cfg.get("llm_prompt_active", 0))
+                    prompts = list(cfg.get("llm_prompts", []))
+                    if 0 <= active < len(prompts):
+                        if not (prompts[active].get("text") or "").strip():
+                            warnings.append("Active LLM prompt is empty.")
+            except Exception:
+                pass
+
+            return warnings
 
         # ---- Tabs ----
         def _setup_general_tab(self):
@@ -662,9 +658,9 @@ if HAVE_QT:
             def _test():
                 try:
                     try:
-                        from src.llm_anthropic import process_text  # type: ignore
+                        from .llm_anthropic import process_text  # type: ignore
                     except Exception:
-                        from llm_anthropic import process_text  # type: ignore
+                        from .llm_anthropic import process_text  # type: ignore
                     provider = str(self.provider_combo.currentData() or "anthropic")
                     if provider == "openrouter":
                         api_key = self.openrouter_key_edit.text().strip() or os.environ.get("OPENROUTER_API_KEY", "")
@@ -819,12 +815,16 @@ if HAVE_QT:
             cfg["llm_prompts"] = prompts
             cfg["llm_prompt_active"] = max(0, min(4, active_idx))
             cfg["llm_per_prompt_overrides"] = bool(self.llm_overrides_chk.isChecked())
-            # Keep legacy single prompt in sync with active prompt
-            try:
-                active_prompt_text = prompts[cfg["llm_prompt_active"]]["text"] if prompts else ""
-            except Exception:
-                active_prompt_text = ""
-            cfg["anthropic_prompt"] = str(active_prompt_text or "")
+            # Keep legacy single prompt in sync with active prompt (centralized)
+            sync_legacy_prompt(cfg)
+
+            # Pre-save validation with surfaced warnings
+            warns = self._validate_before_save(cfg)
+            if warns:
+                try:
+                    QMessageBox.warning(self, "Settings — Warnings", "\n".join(warns))
+                except Exception:
+                    pass
 
             ok = save_config(cfg)
             if ok:

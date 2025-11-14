@@ -13,11 +13,6 @@ import time
 import random
 from typing import Optional
 
-import os
-import time
-import random
-from typing import Optional
-
 
 class AnthropicRecoverableError(Exception):
     pass
@@ -243,68 +238,47 @@ def process_text(
                 headers = {
                     "content-type": "application/json",
                     "x-api-key": api_key,
-                    "anthropic-version": os.environ.get("ANTHROPIC_API_VERSION", "2023-06-01"),
                 }
                 payload = {
                     "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": float(temperature),
+                    "messages": [
+                        {"role": "user", "content": text},
+                    ],
                     "system": system_prompt,
-                    "messages": [{"role": "user", "content": text}],
+                    "max_tokens": int(max_tokens),
+                    "temperature": float(temperature),
                 }
+                url = "https://api.anthropic.com/v1/messages"
                 with httpx.Client(timeout=timeout_s) as client:
-                    resp = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+                    resp = client.post(url, headers=headers, json=payload)
                 if resp.status_code in (401, 403):
-                    raise AnthropicAuthOrConfigError("Authentication failed or access denied")
+                    raise AnthropicAuthOrConfigError("Anthropic authentication failed or access denied")
                 if resp.status_code >= 400:
-                    # Try to surface Anthropic error details (e.g., model not found)
                     detail = None
                     try:
                         err = resp.json()
                         if isinstance(err, dict):
-                            if "error" in err and isinstance(err["error"], dict):
-                                et = err["error"].get("type")
-                                em = err["error"].get("message")
-                                if et and em:
-                                    detail = f"{et}: {em}"
+                            detail = err.get("error") or err.get("message") or None
                     except Exception:
-                        # Fallback to text body
                         if resp.text:
                             detail = resp.text.strip()
-
-                    # Special-case model not found to provide a helpful hint
-                    if detail and "not_found_error" in detail and "model" in detail.lower():
-                        raise RuntimeError(
-                            f"Model not found: '{model}'. If using Anthropic, try 'claude-4.5-sonnet'. For 1M context via OpenRouter, use 'anthropic/claude-sonnet-4.5'."
-                        )
-
-                    # Treat as recoverable depending on status
                     if _is_recoverable(Exception(detail or resp.text), status_code=resp.status_code):
                         raise AnthropicRecoverableError(f"HTTP {resp.status_code}")
-                    raise RuntimeError(f"Anthropic error: HTTP {resp.status_code}{(' – ' + detail) if detail else ''}")
+                    raise RuntimeError(f"Anthropic error: HTTP {resp.status_code}{(' – ' + str(detail)) if detail else ''}")
                 data = resp.json()
                 md = _extract_text_from_rest_response(data)
                 return md
-        except AnthropicAuthOrConfigError:
+        except (AnthropicAuthOrConfigError, RuntimeError) as e:
+            # Non-recoverable
             raise
         except Exception as e:  # noqa: BLE001
             last_exc = e
-            # Try to map SDK status codes if available
-            status_code: Optional[int] = None
-            try:
-                if have_sdk and isinstance(e, APIStatusError):  # type: ignore
-                    status_code = getattr(e, "status_code", None)
-            except Exception:
-                status_code = None
-
-            if isinstance(e, AnthropicRecoverableError) or _is_recoverable(e, status_code=status_code):
+            # Try again on recoverables
+            if isinstance(e, AnthropicRecoverableError) or _is_recoverable(e):
                 if attempt < retries:
                     _sleep_backoff(attempt)
                     continue
                 raise AnthropicRecoverableError("Exhausted retries for Anthropic request")
-            if status_code in (401, 403):
-                raise AnthropicAuthOrConfigError("Authentication failed or access denied")
-            # Non-recoverable
             raise
 
     if last_exc:
@@ -313,9 +287,10 @@ def process_text(
 
 
 def sanitize_first_line(text: str) -> str:
-    s = (text or "").strip().splitlines()[0] if text and text.strip() else ""
-    if s.startswith("# "):
-        s = s[2:]
-    # Replace path-unfriendly chars
-    safe = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in s).strip()
-    return safe[:80] or "LLM Result"
+    """Utility to build a good ePub title from LLM output's first line."""
+    first = (text or "").strip().splitlines()[0:1]
+    if not first:
+        return "Untitled"
+    title = first[0].strip("# -* ")[:120]
+    return title or "Untitled"
+

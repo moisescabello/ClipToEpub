@@ -91,7 +91,7 @@ echo "Press Ctrl+C to stop the application"
 echo -e "${BLUE}=================================================${NC}"
 
 # Run the menu bar app
-python src/menubar_app.py
+python -m cliptoepub.menubar_app -q
 
 # Deactivate virtual environment when done
 deactivate

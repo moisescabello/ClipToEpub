@@ -6,14 +6,7 @@ Unified converter backend
 """
 
 # Import compatibility patch for 'imp' module first
-try:
-    from . import imp_patch
-except ImportError:
-    try:
-        import imp_patch
-    except ImportError:
-        # Patch not available - this is acceptable as it's for Python 3.12+ compatibility
-        pass
+from . import imp_patch  # noqa: F401
 
 import rumps
 import asyncio
@@ -26,15 +19,16 @@ from pathlib import Path
 from datetime import datetime
 import pync
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.converter import ClipboardToEpubConverter
-# Robust import for paths module whether run from repo root or src/
-try:
-    from src import paths as paths  # type: ignore
-except Exception:
-    import paths  # type: ignore
+from .converter import ClipboardToEpubConverter
+from . import paths as paths
+from .hotkeys import parse_hotkey_string
+from .llm_config import (
+    ensure_llm_config,
+    get_prompt_menu_items,
+    resolve_prompt_params,
+    build_overrides_for_prompt,
+)
+from .errors import ErrorEvent
 
 
 class ClipToEpubApp(rumps.App):
@@ -108,7 +102,7 @@ class ClipToEpubApp(rumps.App):
 
         # Load existing configuration
         self.load_config()
-        self._ensure_llm_config()
+        ensure_llm_config(self.config)
 
         # Initialize converter
         self.converter = None
@@ -117,9 +111,12 @@ class ClipToEpubApp(rumps.App):
         # Setup menu items
         self.setup_menu()
 
-        # Start converter in background thread
+        # Start converter in background thread (deferred to avoid early event taps)
         self.converter_thread = None
-        self.start_converter()
+        try:
+            self._call_on_main_thread_once(0.2, self.start_converter)
+        except Exception as e:
+            print(f"Converter schedule error: {e}")
 
         # Setup LLM hotkey listener
         self.llm_listener = None
@@ -165,43 +162,9 @@ class ClipToEpubApp(rumps.App):
             except Exception as e:
                 print(f"Error loading config: {e}")
         # Normalize new keys
-        self._ensure_llm_config()
+        ensure_llm_config(self.config)
 
-    def _ensure_llm_config(self):
-        try:
-            prompts = self.config.get("llm_prompts")
-            if not isinstance(prompts, list):
-                prompts = []
-            norm = []
-            for i in range(5):
-                item = prompts[i] if i < len(prompts) else {}
-                name = str(item.get("name", "")) if isinstance(item, dict) else ""
-                text = str(item.get("text", "")) if isinstance(item, dict) else ""
-                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                norm.append({"name": name, "text": text, "overrides": overrides})
-            self.config["llm_prompts"] = norm
-            if not any(p.get("text") for p in norm) and self.config.get("anthropic_prompt"):
-                self.config["llm_prompts"][0]["text"] = str(self.config.get("anthropic_prompt", ""))
-                self.config.setdefault("llm_prompt_active", 0)
-            try:
-                idx = int(self.config.get("llm_prompt_active", 0))
-            except Exception:
-                idx = 0
-            if idx < 0 or idx > 4:
-                self.config["llm_prompt_active"] = 0
-            self.config["llm_per_prompt_overrides"] = bool(self.config.get("llm_per_prompt_overrides", False))
-        except Exception:
-            self.config["llm_prompts"] = [
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-            ]
-            self.config["llm_prompt_active"] = 0
-            self.config["llm_per_prompt_overrides"] = False
+    # LLM prompt normalization is centralized in llm_config.ensure_llm_config
 
     def save_config(self):
         """Save configuration to file"""
@@ -222,39 +185,6 @@ class ClipToEpubApp(rumps.App):
         """Initialize the converter with current configuration"""
         try:
             # Parse hotkey string into pynput combo for accuracy
-            def parse_hotkey_string(text):
-                try:
-                    from pynput import keyboard
-                except Exception:
-                    return None
-                if not text:
-                    return None
-                parts = [p.strip().lower() for p in str(text).split('+') if p.strip()]
-                combo = set()
-                for p in parts:
-                    if p in ("ctrl", "control"):
-                        combo.add(keyboard.Key.ctrl)
-                    elif p in ("cmd", "command", "meta"):
-                        combo.add(keyboard.Key.cmd)
-                    elif p in ("alt", "option"):
-                        combo.add(keyboard.Key.alt)
-                    elif p == "shift":
-                        combo.add(keyboard.Key.shift)
-                    elif len(p) == 1:
-                        combo.add(keyboard.KeyCode.from_char(p))
-                    elif p.startswith('f') and p[1:].isdigit():
-                        try:
-                            combo.add(getattr(keyboard.Key, p))
-                        except AttributeError:
-                            pass
-                    elif p in ("space", "tab", "enter", "return", "backspace", "esc", "escape"):
-                        key_name = "esc" if p == "escape" else ("enter" if p == "return" else p)
-                        try:
-                            combo.add(getattr(keyboard.Key, key_name))
-                        except AttributeError:
-                            pass
-                return combo or None
-
             hotkey_combo = parse_hotkey_string(self.config.get("hotkey"))
 
             self.converter = ClipboardToEpubConverter(
@@ -293,13 +223,8 @@ class ClipToEpubApp(rumps.App):
         # Build LLM items as first-level entries
         llm_items: list = []
         try:
-            for i, p in enumerate(self.config.get("llm_prompts", [])):
-                text = (p or {}).get("text", "") if isinstance(p, dict) else ""
-                if not str(text).strip():
-                    continue
-                name = (p or {}).get("name", "") if isinstance(p, dict) else ""
-                label = name.strip() or f"Prompt {i+1}"
-                item = rumps.MenuItem(f"LLM - {label}", callback=(lambda sender, idx=i: self.convert_with_llm(None, idx)))
+            for idx, label in get_prompt_menu_items(self.config):
+                item = rumps.MenuItem(f"LLM - {label}", callback=(lambda sender, i=idx: self.convert_with_llm(None, i)))
                 llm_items.append(item)
         except Exception as e:
             print(f"LLM menu build error: {e}")
@@ -426,22 +351,15 @@ class ClipToEpubApp(rumps.App):
                 # Run via converter to reuse yt-dlp + LLM pipeline, passing the captured URL
                 captured_url = str(clip_text)
 
-                # Build selected prompt overrides
+                # Build selected prompt overrides (centralized)
                 def _selected_prompt_and_overrides() -> tuple[str, dict]:
-                    prompts = self.config.get("llm_prompts", [])
-                    use_idx = int(self.config.get("llm_prompt_active", 0)) if prompt_index is None else int(prompt_index)
-                    if use_idx < 0 or use_idx >= len(prompts):
-                        use_idx = 0
-                    item = prompts[use_idx] if isinstance(prompts, list) else {}
-                    prompt_text = str((item or {}).get("text", ""))
-                    overrides = {}
-                    if bool(self.config.get("llm_per_prompt_overrides", False)):
-                        ov = (item or {}).get("overrides", {}) or {}
-                        if isinstance(ov, dict):
-                            overrides = ov.copy()
-                    # Always include prompt text as override for YouTube flow
-                    overrides["system_prompt"] = prompt_text
-                    return prompt_text, overrides
+                    try:
+                        idx = int(self.config.get("llm_prompt_active", 0)) if prompt_index is None else int(prompt_index)
+                    except Exception:
+                        idx = 0
+                    ov = build_overrides_for_prompt(self.config, idx)
+                    prompt_text = str(ov.get("system_prompt", ""))
+                    return prompt_text, ov
 
                 def run_youtube():
                     try:
@@ -467,61 +385,20 @@ class ClipToEpubApp(rumps.App):
                 t.start()
                 return
 
-            # Resolve provider and API key
-            provider = str(self.config.get("llm_provider", "anthropic")).strip().lower()
-            if provider == "openrouter":
-                api_key = os.environ.get("OPENROUTER_API_KEY") or str(self.config.get("openrouter_api_key", ""))
-                model = str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")) or "anthropic/claude-sonnet-4.5"
-                if "/" not in model:
-                    # Map common Anthropic ids to OpenRouter equivalents
-                    if model.lower() in {"claude-4.5-sonnet", "claude-sonnet-4.5", "sonnet-4.5"}:
-                        model = "anthropic/claude-sonnet-4.5"
-            else:
-                api_key = os.environ.get("ANTHROPIC_API_KEY") or str(self.config.get("anthropic_api_key", ""))
-                model = str(self.config.get("anthropic_model", "claude-4.5-sonnet")) or "claude-4.5-sonnet"
-                if "/" in model:
-                    if model.lower() in {"anthropic/claude-sonnet-4.5"}:
-                        model = "claude-4.5-sonnet"
-            # Select prompt + optional per-prompt overrides
-            prompts = self.config.get("llm_prompts", [])
-            use_idx = int(self.config.get("llm_prompt_active", 0)) if prompt_index is None else int(prompt_index)
-            if use_idx < 0 or use_idx >= len(prompts):
-                use_idx = 0
-            item = prompts[use_idx] if isinstance(prompts, list) else {}
-            prompt = str((item or {}).get("text", "")) or str(self.config.get("anthropic_prompt", ""))
-            if bool(self.config.get("llm_per_prompt_overrides", False)):
-                ov = (item or {}).get("overrides", {}) or {}
-                if isinstance(ov, dict):
-                    model = str(ov.get("model", model) or model)
-                    try:
-                        max_tokens = int(ov.get("max_tokens", self.config.get("anthropic_max_tokens", 2048)))
-                    except Exception:
-                        max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                    try:
-                        temperature = float(ov.get("temperature", self.config.get("anthropic_temperature", 0.2)))
-                    except Exception:
-                        temperature = float(self.config.get("anthropic_temperature", 0.2))
-                    try:
-                        timeout_s = int(ov.get("timeout_seconds", self.config.get("anthropic_timeout_seconds", 60)))
-                    except Exception:
-                        timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                    try:
-                        retries = int(ov.get("retry_count", self.config.get("anthropic_retry_count", 10)))
-                    except Exception:
-                        retries = int(self.config.get("anthropic_retry_count", 10))
-                else:
-                    max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                    temperature = float(self.config.get("anthropic_temperature", 0.2))
-                    timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                    retries = int(self.config.get("anthropic_retry_count", 10))
-            else:
-                max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                temperature = float(self.config.get("anthropic_temperature", 0.2))
-                timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                retries = int(self.config.get("anthropic_retry_count", 10))
+            # Resolve provider/model/prompt and numeric params (centralized)
+            params = resolve_prompt_params(self.config, prompt_index)
+            provider = params.get("provider", "openrouter")
+            api_key = params.get("api_key", "")
+            model = params.get("model", "anthropic/claude-sonnet-4.5")
+            prompt = params.get("system_prompt", "")
+            max_tokens = int(params.get("max_tokens", 2048))
+            temperature = float(params.get("temperature", 0.2))
+            timeout_s = int(params.get("timeout_seconds", 60))
+            retries = int(params.get("retry_count", 10))
 
             if not api_key or not prompt:
-                self.notify("Anthropic", "Configure API Key and Prompt in Settings")
+                provider_label = params.get("provider_label", "LLM")
+                self.notify(provider_label, "Configure API Key and Prompt in Settings")
                 return
 
             if not clip_text or not str(clip_text).strip():
@@ -531,13 +408,19 @@ class ClipToEpubApp(rumps.App):
             # Run LLM and conversion on a worker thread
             def run():
                 try:
-                    try:
-                        from src.llm_anthropic import process_text, sanitize_first_line  # type: ignore
-                    except Exception:
-                        from llm_anthropic import process_text, sanitize_first_line  # type: ignore
+                    from .llm.base import LLMRequest
+                    from .llm.anthropic import AnthropicProvider
+                    from .llm.openrouter import OpenRouterProvider
+                    from .llm_anthropic import sanitize_first_line  # type: ignore
 
-                    md = process_text(
-                        str(clip_text),
+                    provider_name = str(provider or "openrouter").strip().lower()
+                    if provider_name == "openrouter":
+                        llm_provider = OpenRouterProvider()
+                    else:
+                        llm_provider = AnthropicProvider()
+
+                    request = LLMRequest(
+                        text=str(clip_text),
                         api_key=str(api_key),
                         model=str(model),
                         system_prompt=str(prompt),
@@ -547,8 +430,11 @@ class ClipToEpubApp(rumps.App):
                         retries=int(retries),
                     )
 
+                    md = llm_provider.process(request)
+
                     title = sanitize_first_line(md)
-                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=["anthropic"]) if self.converter else None
+                    tags = ["anthropic"] if provider_name != "openrouter" else ["openrouter"]
+                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=tags) if self.converter else None
 
                     if path:
                         if self.config["show_notifications"]:
@@ -704,6 +590,16 @@ class ClipToEpubApp(rumps.App):
 
                     # Start the converter listener
                     self.converter.conversion_callback = on_conversion
+                    # Surface converter errors to the user as notifications
+                    def on_error(event):
+                        try:
+                            if isinstance(event, ErrorEvent):
+                                self.notify(event.title, event.message)
+                            else:
+                                self.notify("Error", str(event))
+                        except Exception:
+                            pass
+                    self.converter.error_callback = on_error
                     self.converter.start_listening()
 
                 except Exception as e:
@@ -739,39 +635,6 @@ class ClipToEpubApp(rumps.App):
             print("Quartz constant CGEventKeyboardGetUnicodeString missing; disabling LLM hotkey listener")
             return
 
-        def parse_hotkey_string(text):
-            try:
-                from pynput import keyboard as kb
-            except Exception:
-                return None
-            if not text:
-                return None
-            parts = [p.strip().lower() for p in str(text).split('+') if p.strip()]
-            combo = set()
-            for p in parts:
-                if p in ("ctrl", "control"):
-                    combo.add(kb.Key.ctrl)
-                elif p in ("cmd", "command", "meta"):
-                    combo.add(kb.Key.cmd)
-                elif p in ("alt", "option"):
-                    combo.add(kb.Key.alt)
-                elif p == "shift":
-                    combo.add(kb.Key.shift)
-                elif len(p) == 1:
-                    combo.add(kb.KeyCode.from_char(p))
-                elif p.startswith('f') and p[1:].isdigit():
-                    try:
-                        combo.add(getattr(kb.Key, p))
-                    except AttributeError:
-                        pass
-                elif p in ("space", "tab", "enter", "return", "backspace", "esc", "escape"):
-                    key_name = "esc" if p == "escape" else ("enter" if p == "return" else p)
-                    try:
-                        combo.add(getattr(kb.Key, key_name))
-                    except AttributeError:
-                        pass
-            return combo or None
-
         self.llm_hotkey = parse_hotkey_string(self.config.get("anthropic_hotkey", "cmd+shift+l")) or set()
 
         def on_press(key):
@@ -804,7 +667,10 @@ class ClipToEpubApp(rumps.App):
         try:
             # Stop current converter if running
             if self.converter:
-                self.converter.stop_listening()
+                try:
+                    self.converter.cleanup()
+                except Exception as e:
+                    print(f"Warning: Converter cleanup on restart failed: {e}")
 
             # Reinitialize with new config
             self.init_converter()
@@ -832,7 +698,10 @@ class ClipToEpubApp(rumps.App):
         """Quit the application"""
         try:
             if self.converter:
-                self.converter.stop_listening()
+                try:
+                    self.converter.cleanup()
+                except Exception as e:
+                    print(f"Warning: Converter cleanup on quit failed: {e}")
             if self.llm_listener:
                 try:
                     self.llm_listener.stop()

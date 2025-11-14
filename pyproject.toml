@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cliptoepub"
+version = "1.0.0"
+description = "Convert clipboard content to ePub files with a global hotkey"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "ClipToEpub Team", email = "contact@cliptoepub.app" },
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: MacOS X",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Office/Business",
+  "Topic :: Text Processing",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "ebooklib>=0.18",
+  "pyperclip>=1.8.2",
+  "pynput>=1.7.6",
+  "rumps>=0.4.0",
+  "pync>=2.0.3",
+  "markdown2>=2.4.0",
+  "striprtf>=0.0.22",
+  "newspaper3k>=0.2.8",
+  "beautifulsoup4>=4.11.0",
+  "lxml>=4.9.3",
+  "lxml_html_clean",
+  "chardet>=5.0.0",
+  "requests>=2.28.0",
+  "Pillow>=9.0.0",
+  "aiofiles>=22.0.0",
+  "pytesseract>=0.3.10",
+  "python-dateutil>=2.8.2",
+  "nltk>=3.8",
+]
+
+[project.urls]
+"Bug Reports" = "https://github.com/clipboardtoepub/issues"
+"Source" = "https://github.com/clipboardtoepub/clipboard-to-epub"
+"Documentation" = "https://clipboardtoepub.readthedocs.io"
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.scripts]
+cliptoepub-menubar = "cliptoepub.menubar_app:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

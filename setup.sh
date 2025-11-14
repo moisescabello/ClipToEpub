@@ -142,7 +142,7 @@ echo -e "${BLUE}Starting Clipboard to ePub...${NC}"
 source venv/bin/activate
 
 # Run the application (menu bar)
-python src/menubar_app.py "$@"
+python -m cliptoepub.menubar_app "$@"
 
 # Deactivate virtual environment on exit
 deactivate

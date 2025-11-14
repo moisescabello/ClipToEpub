@@ -1,0 +1,38 @@
+# Constraints file for reproducible installations
+#
+# Use together with requirements.txt:
+#   pip install -r requirements.txt -c constraints.txt
+#
+# Core libraries pinned to known working versions
+ebooklib==0.18
+pyperclip==1.8.2
+pynput==1.7.6
+lxml==4.9.3
+python-dateutil==2.8.2
+black==23.11.0
+flake8==6.1.0
+
+# Content and parsing libraries constrained to their tested major versions
+markdown2<3.0.0
+striprtf<0.1.0
+beautifulsoup4<5.0.0
+requests<3.0.0
+newspaper3k<0.3.0
+nltk<4.0.0
+chardet<6.0.0
+lxml_html_clean<2.0.0
+
+# Platform/UI helpers
+rumps<1.0.0
+pync<3.0.0
+PySide6<7.0.0
+
+# Media, async and OCR
+Pillow<11.0.0
+aiofiles<24.0.0
+pytesseract<1.0.0
+
+# LLM and HTTP clients
+anthropic<1.0.0
+httpx<1.0.0
+

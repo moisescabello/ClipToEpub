@@ -36,7 +36,6 @@ echo "Copying application files..."
 cp -r src "$RESOURCES_DIR/"
 cp -r templates "$RESOURCES_DIR/" 2>/dev/null || true
 cp -r resources "$RESOURCES_DIR/" 2>/dev/null || true
-cp content_processor.py "$RESOURCES_DIR/" 2>/dev/null || true
 
 # Copy icon
 if [ -f "resources/icon.icns" ]; then
@@ -53,7 +52,8 @@ RESOURCES_DIR="$(dirname "$0")/../Resources"
 PROJECT_DIR="$(dirname "$0")/../../.."
 
 # Setup Python path
-export PYTHONPATH="$RESOURCES_DIR:$PYTHONPATH"
+# Ensure both package (src) and root modules are importable
+export PYTHONPATH="$RESOURCES_DIR/src:$RESOURCES_DIR:$PYTHONPATH"
 
 # Check for Python installation
 if ! command -v python3 &> /dev/null; then
@@ -80,13 +80,11 @@ fi
 # Launch the application
 cd "$RESOURCES_DIR"
 
-# Try menubar app first
-if [ -f "src/menubar_app.py" ]; then
-    python src/menubar_app.py
-else
-    osascript -e 'display dialog "Application files not found!" buttons {"OK"} default button "OK"'
+# Launch via package module
+python -m cliptoepub.menubar_app || {
+    osascript -e 'display dialog "Failed to launch application." buttons {"OK"} default button "OK"'
     exit 1
-fi
+}
 EOF
 
 # Make executable

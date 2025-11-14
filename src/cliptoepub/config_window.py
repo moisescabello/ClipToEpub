@@ -10,11 +10,9 @@ import json
 from pathlib import Path
 import sys
 import os
-# Robust import for paths whether run from repo root or src/
-try:
-    from src import paths as paths  # type: ignore
-except Exception:
-    import paths  # type: ignore
+from . import paths as paths
+from .llm_config import ensure_llm_config, sync_legacy_prompt
+import tempfile
 
 
 class ConfigWindow:
@@ -82,15 +80,15 @@ class ConfigWindow:
                         if key not in config:
                             config[key] = value
                     # Normalize multi-prompt schema
-                    self._ensure_llm_prompts_struct(config)
+                    ensure_llm_config(config)
                     return config
             except Exception as e:
                 print(f"Error loading config: {e}")
                 cfg = self.default_config.copy()
-                self._ensure_llm_prompts_struct(cfg)
+                ensure_llm_config(cfg)
                 return cfg
         cfg = self.default_config.copy()
-        self._ensure_llm_prompts_struct(cfg)
+        ensure_llm_config(cfg)
         return cfg
 
     def save_config(self):
@@ -152,11 +150,8 @@ class ConfigWindow:
             self.config["llm_prompts"] = prompts
             self.config["llm_prompt_active"] = int(self.llm_active_var.get())
             self.config["llm_per_prompt_overrides"] = bool(self.llm_overrides_var.get())
-            # Legacy single prompt sync
-            try:
-                self.config["anthropic_prompt"] = prompts[self.config["llm_prompt_active"]]["text"]
-            except Exception:
-                self.config["anthropic_prompt"] = ""
+            # Legacy single prompt sync (centralized)
+            sync_legacy_prompt(self.config)
             try:
                 self.config["anthropic_max_tokens"] = int(self.anthropic_max_tokens_var.get())
             except ValueError:
@@ -214,6 +209,34 @@ class ConfigWindow:
             # Write config file
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
+
+            # Surface non-blocking warnings relevant to runtime behavior
+            warnings = []
+            try:
+                provider = (self.config.get("llm_provider", "openrouter") or "").strip().lower()
+                if provider == "anthropic":
+                    if not (self.config.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")):
+                        warnings.append("Anthropic provider selected but no API key configured.")
+                elif provider == "openrouter":
+                    if not (self.config.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")):
+                        warnings.append("OpenRouter provider selected but no API key configured.")
+            except Exception:
+                pass
+
+            # Output directory write check
+            try:
+                out_dir = Path(self.config.get("output_directory") or "").expanduser()
+                out_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=str(out_dir), prefix="cte_chk_", delete=True):
+                    pass
+            except Exception:
+                warnings.append("Output directory may not be writable. ePubs could fail to save.")
+
+            if warnings:
+                try:
+                    messagebox.showwarning("Settings — Warnings", "\n".join(warnings))
+                except Exception:
+                    pass
 
             messagebox.showinfo("Success", "Configuration saved successfully!\n\nRestart the menu bar app to apply changes.")
             return True
@@ -599,9 +622,9 @@ class ConfigWindow:
         def _test_llm():
             try:
                 try:
-                    from src.llm_anthropic import process_text  # type: ignore
+                    from .llm_anthropic import process_text  # type: ignore
                 except Exception:
-                    from llm_anthropic import process_text  # type: ignore
+                    from .llm_anthropic import process_text  # type: ignore
                 provider = (self.llm_provider_var.get() or "anthropic").strip().lower()
                 if provider == "openrouter":
                     api_key = self.openrouter_api_key_var.get().strip() or os.environ.get("OPENROUTER_API_KEY", "")
@@ -868,41 +891,7 @@ class ConfigWindow:
                 out.append(p)
         return "+".join(out)
 
-    def _ensure_llm_prompts_struct(self, cfg: dict) -> None:
-        try:
-            prompts = cfg.get("llm_prompts")
-            if not isinstance(prompts, list):
-                prompts = []
-            norm = []
-            for i in range(5):
-                item = prompts[i] if i < len(prompts) else {}
-                name = str(item.get("name", "")) if isinstance(item, dict) else ""
-                text = str(item.get("text", "")) if isinstance(item, dict) else ""
-                overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
-                if not isinstance(overrides, dict):
-                    overrides = {}
-                norm.append({"name": name, "text": text, "overrides": overrides})
-            cfg["llm_prompts"] = norm
-            if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
-                cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
-                cfg.setdefault("llm_prompt_active", 0)
-            try:
-                idx = int(cfg.get("llm_prompt_active", 0))
-            except Exception:
-                idx = 0
-            if idx < 0 or idx > 4:
-                cfg["llm_prompt_active"] = 0
-            cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
-        except Exception:
-            cfg["llm_prompts"] = [
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-                {"name": "", "text": "", "overrides": {}},
-            ]
-            cfg["llm_prompt_active"] = 0
-            cfg["llm_per_prompt_overrides"] = False
+    # LLM prompt normalization is centralized in llm_config.ensure_llm_config
 
     def _sync_prompt_overrides_state(self):
         # Tk simple UI: fields remain editable; checkbox acts as logical toggle captured on save

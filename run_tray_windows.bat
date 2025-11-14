@@ -8,7 +8,7 @@ REM Activate virtual environment if present
 if exist "venv\Scripts\activate.bat" call "venv\Scripts\activate.bat"
 
 echo Launching Clipboard to ePub (Windows Tray)...
-python "src\tray_app_windows.py"
+python -m cliptoepub.tray_app_windows
 if errorlevel 1 (
   echo.
   echo If you see 'ModuleNotFoundError' (e.g., PySide6), install dependencies:

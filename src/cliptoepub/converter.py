@@ -25,29 +25,16 @@ from pynput import keyboard
 import os
 import sys
 
-# Ensure repository root is on sys.path so top-level modules resolve (content_processor)
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 # Local imports
-try:
-    # Prefer package import when run from app scripts
-    from src import paths as paths  # type: ignore
-except Exception:
-    # Fallback when executed with CWD on src/
-    import paths  # type: ignore
-from content_processor import process_clipboard_content
-try:
-    from src.history_manager import ClipboardAccumulator, ConversionCache, ConversionHistory  # type: ignore
-except Exception:
-    from history_manager import ClipboardAccumulator, ConversionCache, ConversionHistory  # type: ignore
-try:
-    from src.image_handler import ImageHandler  # type: ignore
-except Exception:
-    from image_handler import ImageHandler  # type: ignore
-try:
-    from src.edit_window import PreConversionEditor  # type: ignore
-except Exception:
-    from edit_window import PreConversionEditor  # type: ignore
+from . import paths as paths
+from .content_processor import process_clipboard_content
+from .history_manager import ClipboardAccumulator, ConversionCache, ConversionHistory
+from .image_handler import ImageHandler
+from .edit_window import PreConversionEditor
+from .errors import notify_error
+from .llm.base import LLMRequest
+from .llm.anthropic import AnthropicProvider
+from .llm.openrouter import OpenRouterProvider
 
 
 # Logging
@@ -60,6 +47,8 @@ logger = logging.getLogger("ClipboardToEpub")
 # Allow overriding the sync wrapper timeout (in seconds) via env var
 # to accommodate long Newspaper3k fetches or large conversions.
 SYNC_JOIN_TIMEOUT = int(os.environ.get("CLIPTOEPUB_SYNC_TIMEOUT", "120"))
+# yt-dlp invocation timeout (in seconds) for YouTube subtitle downloads
+YTDLP_TIMEOUT_SECONDS = int(os.environ.get("CLIPTOEPUB_YTDLP_TIMEOUT", "120"))
 
 
 def _platform_hotkeys():
@@ -270,6 +259,10 @@ class ClipboardToEpubConverter:
             return asyncio.run(self.convert_clipboard_content_async(use_accumulator=use_accumulator, llm_overrides=llm_overrides))
         except Exception as e:
             logger.error(f"Error in sync conversion: {e}")
+            try:
+                notify_error(self.error_callback, "Conversion Error", str(e), severity="error")
+            except Exception:
+                pass
             return None
 
     def convert_text_to_epub(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None) -> Optional[str]:
@@ -306,6 +299,10 @@ class ClipboardToEpubConverter:
             return asyncio.run(self.convert_text_to_epub_async(text, suggested_title=suggested_title, tags=tags))
         except Exception as e:
             logger.error(f"Error converting provided text: {e}")
+            try:
+                notify_error(self.error_callback, "Conversion Error", str(e), severity="error", context={"mode": "direct_text"})
+            except Exception:
+                pass
             return None
 
     async def convert_text_to_epub_async(self, text: str, suggested_title: Optional[str] = None, tags: Optional[List[str]] = None, *, acquire_conversion_slot: bool = True) -> Optional[str]:
@@ -411,8 +408,12 @@ class ClipboardToEpubConverter:
 
     # --------- Internals / Async ---------
     async def convert_clipboard_content_async(
-        self, clipboard_content: Optional[str] = None, use_accumulator: bool = False, llm_overrides: Optional[Dict[str, Any]] = None
+        self,
+        clipboard_content: Optional[str] = None,
+        use_accumulator: bool = False,
+        llm_overrides: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
+        """Async entry point for converting clipboard content to ePub."""
         self._inc_queued(1)
         await self._acquire_conversion_slot_async()
         self._inc_queued(-1)
@@ -421,6 +422,9 @@ class ClipboardToEpubConverter:
             try:
                 # Source content and metadata
                 # Priority: Images → URLs/Markdown/HTML/RTF/Plain (via processor)
+                content: Optional[str]
+                metadata: Dict[str, Any]
+
                 if not use_accumulator and clipboard_content is None:
                     # Give priority to images currently in the clipboard
                     try:
@@ -430,6 +434,7 @@ class ClipboardToEpubConverter:
                     if maybe_image is not None:
                         logger.info("Image detected in clipboard (priority path)")
                         return await self._convert_image_to_epub_async(maybe_image)
+
                 if use_accumulator:
                     content = self.accumulator.combine_clips()
                     metadata = self.accumulator.get_combined_metadata()
@@ -440,7 +445,7 @@ class ClipboardToEpubConverter:
                     content = clipboard_content or await self._get_clipboard_content_async()
                     metadata = {}
 
-                if not content or not content.strip():
+                if not content or not str(content).strip():
                     # Fallback: check for image if no textual content
                     try:
                         image = self.image_handler.detect_image_in_clipboard()
@@ -470,9 +475,12 @@ class ClipboardToEpubConverter:
                     except Exception:
                         words_per_chapter = self.chapter_words
                 css_template = str(metadata.get("style", self.default_style))
-                options = {"words_per_chapter": words_per_chapter, "css_template": css_template}
+                options: Dict[str, Any] = {
+                    "words_per_chapter": words_per_chapter,
+                    "css_template": css_template,
+                }
 
-                # Cache check (after potential edits so we don't skip user's changes)
+                # Cache check (after potential edits so we do not skip user's changes)
                 if self.cache:
                     cached = self.cache.get(content, options)
                     if cached:
@@ -480,18 +488,29 @@ class ClipboardToEpubConverter:
                         return await self._create_epub_from_cached_async(cached)
 
                 # Special case: If content is a bare YouTube URL, fetch subtitles and route via LLM
-                try:
-                    if not use_accumulator and isinstance(content, str) and self._looks_like_youtube_url(content.strip()):
+                if (
+                    not use_accumulator
+                    and isinstance(content, str)
+                    and self._looks_like_youtube_url(content.strip())
+                ):
+                    try:
                         logger.info("YouTube URL detected; attempting subtitles + LLM pipeline")
-                        path = await self._handle_youtube_url_async(content.strip(), llm_overrides=llm_overrides or {})
+                        path = await self._handle_youtube_url_async(
+                            content.strip(), llm_overrides=llm_overrides or {}
+                        )
                         if path:
                             return path
-                except Exception as e:
-                    logger.warning(f"YouTube path failed; falling back to generic processing: {e}")
+                        logger.info("YouTube pipeline did not produce an ePub; falling back to generic processing")
+                    except Exception as e:
+                        logger.warning(
+                            f"YouTube path failed; falling back to generic processing: {e}"
+                        )
 
                 # Process content (thread pool)
                 loop = asyncio.get_running_loop()
-                processed = await loop.run_in_executor(self.executor, process_clipboard_content, content, options)
+                processed = await loop.run_in_executor(
+                    self.executor, process_clipboard_content, content, options
+                )
 
                 # Create ePub
                 path = await self._create_epub_async(processed, metadata)
@@ -514,8 +533,10 @@ class ClipboardToEpubConverter:
                 return path
             except Exception as e:
                 logger.error(f"Error in async conversion: {e}", exc_info=True)
-                if self.error_callback:
-                    self.error_callback(str(e))
+                try:
+                    notify_error(self.error_callback, "Conversion Error", str(e), severity="error")
+                except Exception:
+                    pass
                 return None
         finally:
             self._inc_active(-1)
@@ -544,14 +565,41 @@ class ClipboardToEpubConverter:
     async def _handle_youtube_url_async(self, url: str, llm_overrides: Optional[Dict[str, Any]] = None) -> Optional[str]:
         # Download subtitles with language + native/auto preference
         loop = asyncio.get_running_loop()
+        reported_error = False
         try:
             transcript_text = await loop.run_in_executor(self.executor, self._download_youtube_subtitles_blocking, url)
         except Exception as e:
-            logger.warning(f"yt-dlp invocation error: {e}")
+            logger.warning("yt-dlp invocation error for %s: %s", url, e)
+            try:
+                notify_error(
+                    self.error_callback,
+                    "YouTube Error",
+                    f"yt-dlp failed for this URL: {e}",
+                    severity="warning",
+                    context={"url": url, "yt_dlp_binary": self.yt_dlp_binary},
+                )
+            except Exception:
+                pass
+            reported_error = True
             transcript_text = None
 
         if not transcript_text or not transcript_text.strip():
-            logger.info("No subtitles retrieved for YouTube URL")
+            logger.info("No subtitles retrieved for YouTube URL: %s", url)
+            if not reported_error:
+                try:
+                    notify_error(
+                        self.error_callback,
+                        "YouTube Subtitles",
+                        "No subtitles could be retrieved for this YouTube URL; falling back to generic conversion.",
+                        severity="warning",
+                        context={
+                            "url": url,
+                            "yt_dlp_binary": self.yt_dlp_binary,
+                            "langs": list(self.youtube_langs),
+                        },
+                    )
+                except Exception:
+                    pass
             return None
 
         # If LLM prompt not configured, fall back to direct conversion of transcript
@@ -571,7 +619,17 @@ class ClipboardToEpubConverter:
                 llm_overrides or {},
             )
         except Exception as e:
-            logger.error(f"LLM processing failed: {e}")
+            logger.error("LLM processing failed for YouTube URL %s: %s", url, e, exc_info=True)
+            try:
+                notify_error(
+                    self.error_callback,
+                    "LLM Error",
+                    str(e),
+                    severity="error",
+                    context={"url": url},
+                )
+            except Exception:
+                pass
             md = None
 
         if not md or not md.strip():
@@ -581,9 +639,9 @@ class ClipboardToEpubConverter:
         # Title from first line
         try:
             try:
-                from src.llm_anthropic import sanitize_first_line  # type: ignore
+                from .llm_anthropic import sanitize_first_line  # type: ignore
             except Exception:
-                from llm_anthropic import sanitize_first_line  # type: ignore
+                from .llm_anthropic import sanitize_first_line  # type: ignore
             suggested_title = sanitize_first_line(md)
         except Exception:
             suggested_title = "LLM Result"
@@ -597,6 +655,10 @@ class ClipboardToEpubConverter:
             await loop.run_in_executor(None, self._conversion_semaphore.acquire)
         except Exception as e:
             logger.error(f"Failed to acquire conversion slot: {e}")
+            try:
+                notify_error(self.error_callback, "Internal Error", f"Could not acquire conversion slot: {e}", severity="warning")
+            except Exception:
+                pass
 
     def _release_conversion_slot(self) -> None:
         try:
@@ -617,10 +679,39 @@ class ClipboardToEpubConverter:
 
         def run_cmd(args: List[str]) -> bool:
             try:
-                proc = subprocess.run(args, cwd=str(base), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                logger.debug("Running yt-dlp command: %s", " ".join(args))
+                proc = subprocess.run(
+                    args,
+                    cwd=str(base),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=YTDLP_TIMEOUT_SECONDS,
+                )
                 if proc.returncode == 0:
                     return True
-                # Some failures still produce files; continue
+                # Some failures still produce files; log and continue
+                stderr_snippet = (proc.stderr or "").strip().splitlines()[-1] if proc.stderr else ""
+                if stderr_snippet:
+                    logger.warning(
+                        "yt-dlp exited with code %s for %s: %s",
+                        proc.returncode,
+                        url,
+                        stderr_snippet,
+                    )
+                else:
+                    logger.warning(
+                        "yt-dlp exited with code %s for %s",
+                        proc.returncode,
+                        url,
+                    )
+                return False
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "yt-dlp timed out after %s seconds for %s",
+                    YTDLP_TIMEOUT_SECONDS,
+                    url,
+                )
                 return False
             except FileNotFoundError:
                 raise RuntimeError("yt-dlp not found. Install it with 'pip install yt-dlp' or via Homebrew.")
@@ -758,18 +849,15 @@ class ClipboardToEpubConverter:
 
     def _llm_process_blocking(self, text: str, llm_overrides: Optional[Dict[str, Any]] = None) -> str:
         # Route based on provider + available key
-        provider = (self.llm_provider or "anthropic").strip().lower()
-        try:
-            from src.llm_anthropic import process_text  # type: ignore
-        except Exception:
-            from llm_anthropic import process_text  # type: ignore
-
-        if provider == "openrouter":
+        provider_name = (self.llm_provider or "anthropic").strip().lower()
+        if provider_name == "openrouter":
+            provider = OpenRouterProvider()
             api_key = (self.openrouter_api_key or "").strip() or os.environ.get("OPENROUTER_API_KEY", "")
             model = self.anthropic_model or "anthropic/claude-sonnet-4.5"
         else:
+            provider = AnthropicProvider()
             api_key = (self.anthropic_api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
-            # Accept both Anthropic id and OpenRouter id; process_text handles mapping
+            # Accept both Anthropic id and OpenRouter id; AnthropicProvider/process_text handles mapping
             model = self.anthropic_model or "claude-4.5-sonnet"
         ov = llm_overrides or {}
         sys_prompt = str(ov.get("system_prompt", self.anthropic_prompt or ""))
@@ -779,8 +867,8 @@ class ClipboardToEpubConverter:
         timeout_s = int(ov.get("timeout_seconds", self.anthropic_timeout_seconds or 60))
         retries = int(ov.get("retry_count", self.anthropic_retry_count or 10))
 
-        return process_text(
-            str(text or ""),
+        request = LLMRequest(
+            text=str(text or ""),
             api_key=str(api_key or ""),
             model=str(model or "claude-4.5-sonnet"),
             system_prompt=str(sys_prompt or ""),
@@ -789,6 +877,8 @@ class ClipboardToEpubConverter:
             timeout_s=int(timeout_s),
             retries=int(retries),
         )
+
+        return provider.process(request)
 
     async def _convert_image_to_epub_async(self, image: Image.Image) -> Optional[str]:
         try:
@@ -824,6 +914,10 @@ class ClipboardToEpubConverter:
             return path
         except Exception as e:
             logger.error(f"Error converting image: {e}", exc_info=True)
+            try:
+                notify_error(self.error_callback, "Image Conversion Error", str(e), severity="error")
+            except Exception:
+                pass
             return None
 
     async def _show_edit_window_async(self, content: str, metadata: Dict[str, Any]):
@@ -861,95 +955,21 @@ class ClipboardToEpubConverter:
                 logger.warning("Cached data has no chapters")
                 return None
 
-            book = epub.EpubBook()
-            book.set_identifier(str(uuid4()))
+            # Prepare normalized metadata for book assembly
+            meta: Dict[str, Any] = {
+                "title": proc_metadata.get("title") or f'Clipboard_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                "language": proc_metadata.get("language", self.default_language),
+                "authors": proc_metadata.get("authors") or [self.default_author],
+                "date": proc_metadata.get("date"),
+                "description": proc_metadata.get("description"),
+                "source": proc_metadata.get("source"),
+            }
 
-            title = proc_metadata.get("title") or f'Clipboard_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-            book.set_title(title)
-            book.set_language(proc_metadata.get("language", self.default_language))
+            book = self._assemble_epub_book(meta=meta, chapters=chapters, css_style=css_style, format_type=format_type, toc_html=toc_html)
 
-            # Authors
-            authors = proc_metadata.get("authors") or [self.default_author]
-            for a in authors if isinstance(authors, list) else [authors]:
-                book.add_author(a)
-
-            # Metadata and type
-            for key in ["date", "description", "source"]:
-                val = proc_metadata.get(key)
-                if val:
-                    book.add_metadata("DC", key, str(val))
-            book.add_metadata("DC", "type", f"clipboard_{format_type}")
-
-            # CSS
-            css_item = epub.EpubItem(uid="style", file_name="style.css", media_type="text/css", content=css_style)
-            book.add_item(css_item)
-
-            epub_chapters = []
-
-            # Optional static TOC page if provided in cached data
-            if toc_html:
-                toc_page = epub.EpubHtml(uid="toc", file_name="toc.xhtml", title="Table of Contents")
-                page_content = (toc_html or "").strip()
-                # Strip NULs which break XML encoders
-                if "\x00" in page_content:
-                    page_content = page_content.replace("\x00", "")
-                if not (page_content.lower().startswith("<!doctype") or page_content.lower().startswith("<html")):
-                    page_content = f"""<!DOCTYPE html>
-<html xmlns=\"http://www.w3.org/1999/xhtml\">
-<head>
-    <title>Table of Contents</title>
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
-    <meta charset=\"UTF-8\"/>
-    </head>
-<body>
-    {page_content}
-</body>
-</html>"""
-                # Ensure bytes content for ebooklib
-                toc_page.content = page_content.encode("utf-8", errors="ignore")
-                book.add_item(toc_page)
-                epub_chapters.append(toc_page)
-            # Helper to normalize chapter XHTML and ensure UTF-8 bytes
-            def _ensure_xhtml_bytes(doc_title: str, content: str) -> bytes:
-                txt = (content or "").strip()
-                if "\x00" in txt:
-                    txt = txt.replace("\x00", "")
-                inner = txt
-                try:
-                    from bs4 import BeautifulSoup  # type: ignore
-                    soup = BeautifulSoup(txt, 'html.parser')
-                    if soup.body:
-                        inner = soup.body.decode_contents() or inner
-                except Exception:
-                    pass
-                wrapped = f"""
-<html xmlns=\"http://www.w3.org/1999/xhtml\">
-<head>
-    <meta charset=\"UTF-8\"/>
-    <title>{doc_title}</title>
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>
-</head>
-<body>
-    <h1>{doc_title}</h1>
-    {inner}
-</body>
-</html>"""
-                return wrapped.encode("utf-8", errors="ignore")
-
-            for idx, chapter in enumerate(chapters, 1):
-                html = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
-                chapter_content = str(chapter.get("content", ""))
-                html.content = _ensure_xhtml_bytes(str(chapter.get("title", f"Chapter {idx}")), chapter_content)
-                book.add_item(html)
-                epub_chapters.append(html)
-
-            book.spine = ["nav"] + epub_chapters
-            book.toc = epub_chapters
-            book.add_item(epub.EpubNcx())
-            book.add_item(epub.EpubNav())
-
+            # Persist to disk with a clear suffix to indicate cache usage
+            title = meta["title"]
             safe_title = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in title)[:100]
-            # Incluir microsegundos para evitar colisiones en ejecuciones paralelas
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{safe_title}_{timestamp}_cached.epub"
             filepath = self.output_dir / filename
@@ -961,6 +981,10 @@ class ClipboardToEpubConverter:
             return str(filepath)
         except Exception as e:
             logger.error(f"Error creating ePub from cache: {e}", exc_info=True)
+            try:
+                notify_error(self.error_callback, "EPUB Error", f"Cache path failed: {e}", severity="error")
+            except Exception:
+                pass
             return None
 
     async def _create_epub_async(self, processed: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[str]:
@@ -975,47 +999,109 @@ class ClipboardToEpubConverter:
                 logger.warning("No chapters to convert")
                 return None
 
-            book = epub.EpubBook()
-            book.set_identifier(str(uuid4()))
-
+            # Normalize metadata precedence: explicit "metadata" overrides processed metadata
             title = metadata.get("title") or proc_metadata.get("title") or f'Clipboard_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-            book.set_title(title)
-            book.set_language(metadata.get("language", self.default_language))
+            authors = metadata.get("authors") or proc_metadata.get("authors") or [self.default_author]
+            language = metadata.get("language", self.default_language)
+            merged = {**proc_metadata, **metadata}
 
-            # Authors
-            authors = metadata.get("authors") or proc_metadata.get("authors", [self.default_author])
-            for a in authors if isinstance(authors, list) else [authors]:
-                book.add_author(a)
+            meta: Dict[str, Any] = {
+                "title": title,
+                "language": language,
+                "authors": authors,
+                "date": merged.get("date"),
+                "description": merged.get("description"),
+                "source": merged.get("source"),
+            }
 
-            # Metadata
-            for key, value in {**proc_metadata, **metadata}.items():
-                if key in ["date", "description", "source"] and value:
-                    book.add_metadata("DC", key, str(value))
+            book = self._assemble_epub_book(meta=meta, chapters=chapters, css_style=css_style, format_type=format_type, toc_html=toc_html)
 
-            book.add_metadata("DC", "type", f"clipboard_{format_type}")
+            safe_title = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in title)[:100]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"{safe_title}_{timestamp}.epub"
+            filepath = self.output_dir / filename
 
-            css_item = epub.EpubItem(uid="style", file_name="style.css", media_type="text/css", content=css_style)
-            book.add_item(css_item)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self.executor, epub.write_epub, str(filepath), book, {})
 
-            epub_chapters = []
+            logger.info(f"ePub created: {filename}")
+            logger.info(f"   Format: {format_type}")
+            logger.info(f"   Chapters: {len(chapters)}")
+            try:
+                logger.info(f"   Size: {filepath.stat().st_size / 1024:.2f} KB")
+            except Exception:
+                pass
+            return str(filepath)
+        except Exception as e:
+            logger.error(f"Error creating ePub: {e}", exc_info=True)
+            try:
+                notify_error(self.error_callback, "EPUB Error", str(e), severity="error")
+            except Exception:
+                pass
+            return None
 
-            # Optional static TOC page if provided by processor
-            if toc_html:
-                toc_page = epub.EpubHtml(uid="toc", file_name="toc.xhtml", title="Table of Contents")
-                page_content = (toc_html or "").strip()
-                if "\x00" in page_content:
-                    page_content = page_content.replace("\x00", "")
-                # Always wrap TOC in a minimal XHTML skeleton
+    # --------- Shared EPUB assembly ---------
+    def _assemble_epub_book(
+        self,
+        *,
+        meta: Dict[str, Any],
+        chapters: List[Dict[str, Any]],
+        css_style: str,
+        format_type: str,
+        toc_html: Optional[str],
+    ) -> epub.EpubBook:
+        """
+        Build an epub.EpubBook instance from normalized metadata and chapter payload.
+
+        This helper centralizes the previously duplicated logic used by cached and
+        non-cached creation paths to keep output consistent.
+        """
+        book = epub.EpubBook()
+        book.set_identifier(str(uuid4()))
+
+        title = meta.get("title") or f'Clipboard_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        language = meta.get("language", self.default_language)
+        book.set_title(title)
+        book.set_language(language)
+
+        # Authors may be a string or list; normalize to list
+        authors = meta.get("authors") or [self.default_author]
+        for a in authors if isinstance(authors, list) else [authors]:
+            book.add_author(a)
+
+        # Selected metadata keys
+        for key in ("date", "description", "source"):
+            val = meta.get(key)
+            if val:
+                book.add_metadata("DC", key, str(val))
+
+        # Content type helps downstream readers
+        book.add_metadata("DC", "type", f"clipboard_{format_type}")
+
+        # Ensure CSS content is bytes for ebooklib
+        css_bytes = (css_style or "").encode("utf-8", errors="ignore")
+        css_item = epub.EpubItem(uid="style", file_name="style.css", media_type="text/css", content=css_bytes)
+        book.add_item(css_item)
+
+        epub_items: List[Any] = []
+
+        # Optional TOC page (HTML fragment or full doc)
+        if toc_html:
+            toc_page = epub.EpubHtml(uid="toc", file_name="toc.xhtml", title="Table of Contents")
+            page_content = (str(toc_html) or "").strip()
+            if "\x00" in page_content:
+                page_content = page_content.replace("\x00", "")
+            # Try to extract only body content when a full doc is provided
+            try:
+                inner = page_content
                 try:
-                    inner = page_content
-                    try:
-                        from bs4 import BeautifulSoup  # type: ignore
-                        soup = BeautifulSoup(page_content, 'html.parser')
-                        if soup.body:
-                            inner = soup.body.decode_contents() or inner
-                    except Exception:
-                        pass
-                    page_content = f"""
+                    from bs4 import BeautifulSoup  # type: ignore
+                    soup = BeautifulSoup(page_content, 'html.parser')
+                    if soup.body:
+                        inner = soup.body.decode_contents() or inner
+                except Exception:
+                    pass
+                page_content = f"""
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
     <meta charset=\"UTF-8\"/>
@@ -1026,28 +1112,26 @@ class ClipboardToEpubConverter:
     {inner}
 </body>
 </html>"""
-                except Exception:
-                    # Fallback simple page
-                    page_content = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"UTF-8\"/><title>Table of Contents</title><link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/></head><body></body></html>"
-                toc_page.content = page_content.encode("utf-8", errors="ignore")
-                book.add_item(toc_page)
-                epub_chapters.append(toc_page)
-            def _ensure_xhtml(doc_title: str, content: str) -> bytes:
-                txt = (content or "").strip()
-                # Strip NULs which break libxml encoders
-                if "\x00" in txt:
-                    txt = txt.replace("\x00", "")
-                inner = txt
-                # Extract body inner HTML if content is a full document to avoid nested <html>
-                try:
-                    from bs4 import BeautifulSoup  # type: ignore
-                    soup = BeautifulSoup(txt, 'html.parser')
-                    if soup.body:
-                        inner = soup.body.decode_contents() or inner
-                except Exception:
-                    pass
-                # Build minimal XHTML wrapper and force UTF-8 bytes
-                wrapped = f"""
+            except Exception:
+                page_content = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"UTF-8\"/><title>Table of Contents</title><link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/></head><body></body></html>"
+            toc_page.content = page_content.encode("utf-8", errors="ignore")
+            book.add_item(toc_page)
+            epub_items.append(toc_page)
+
+        # Helper to wrap chapter content safely as XHTML bytes
+        def _ensure_xhtml(doc_title: str, content: str) -> bytes:
+            txt = (content or "").strip()
+            if "\x00" in txt:
+                txt = txt.replace("\x00", "")
+            inner = txt
+            try:
+                from bs4 import BeautifulSoup  # type: ignore
+                soup = BeautifulSoup(txt, 'html.parser')
+                if soup.body:
+                    inner = soup.body.decode_contents() or inner
+            except Exception:
+                pass
+            wrapped = f"""
 <html xmlns=\"http://www.w3.org/1999/xhtml\">
 <head>
     <meta charset=\"UTF-8\"/>
@@ -1059,37 +1143,22 @@ class ClipboardToEpubConverter:
     {inner}
 </body>
 </html>"""
-                return wrapped.encode("utf-8", errors="ignore")
+            return wrapped.encode("utf-8", errors="ignore")
 
-            for idx, chapter in enumerate(chapters, 1):
-                html_item = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=chapter["title"])
-                safe_bytes = _ensure_xhtml(chapter["title"], chapter["content"])
-                html_item.content = safe_bytes
-                book.add_item(html_item)
-                epub_chapters.append(html_item)
+        for idx, chapter in enumerate(chapters, 1):
+            title_text = str(chapter.get("title", f"Chapter {idx}"))
+            html_item = epub.EpubHtml(uid=f"chapter_{idx}", file_name=f"chapter_{idx}.xhtml", title=title_text)
+            html_item.content = _ensure_xhtml(title_text, str(chapter.get("content", "")))
+            book.add_item(html_item)
+            epub_items.append(html_item)
 
-            book.spine = ["nav"] + epub_chapters
-            book.toc = epub_chapters
-            book.add_item(epub.EpubNcx())
-            book.add_item(epub.EpubNav())
+        # Spine and navigation
+        book.spine = ["nav"] + epub_items
+        book.toc = epub_items
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
 
-            safe_title = "".join(c if c.isalnum() or c in (" ", "_", "-") else "_" for c in title)[:100]
-            # Incluir microsegundos para evitar colisiones en ejecuciones paralelas
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"{safe_title}_{timestamp}.epub"
-            filepath = self.output_dir / filename
-
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(self.executor, epub.write_epub, str(filepath), book, {})
-
-            logger.info(f"ePub created: {filename}")
-            logger.info(f"   Format: {format_type}")
-            logger.info(f"   Chapters: {len(chapters)}")
-            logger.info(f"   Size: {filepath.stat().st_size / 1024:.2f} KB")
-            return str(filepath)
-        except Exception as e:
-            logger.error(f"Error creating ePub: {e}", exc_info=True)
-            return None
+        return book
 
     # --------- Hotkey callbacks ---------
     def _on_press(self, key):
@@ -1113,12 +1182,9 @@ class ClipboardToEpubConverter:
 
         if key == keyboard.Key.esc:
             logger.info("ESC pressed, stopping listener")
-            # Avoid returning False here to prevent StopException bubbling through macOS event tap.
-            # Stop the listener asynchronously instead.
             def _stop():
                 try:
-                    if self.listener:
-                        self.listener.stop()
+                    self.stop_listening()
                 except Exception:
                     pass
 

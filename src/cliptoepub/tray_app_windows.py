@@ -32,15 +32,16 @@ try:
 except Exception as e:
     HAVE_QT = False
 
-# When executed directly (python src/tray_app_windows.py), src/ is on sys.path
-try:
-    from src import paths as paths  # type: ignore
-except Exception:
-    import paths  # type: ignore
-try:
-    from src.converter import ClipboardToEpubConverter  # type: ignore
-except Exception:
-    from converter import ClipboardToEpubConverter  # type: ignore
+from . import paths as paths
+from .converter import ClipboardToEpubConverter
+from .hotkeys import parse_hotkey_string
+from .llm_config import (
+    ensure_llm_config,
+    get_prompt_menu_items,
+    resolve_prompt_params,
+    build_overrides_for_prompt,
+)
+from .errors import ErrorEvent
 
 
 DEFAULT_CONFIG = {
@@ -96,50 +97,14 @@ def load_config() -> dict:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
             for k, v in DEFAULT_CONFIG.items():
                 data.setdefault(k, v)
-            _ensure_llm_config(data)
+            ensure_llm_config(data)
             return data
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             print(f"Warning: Could not load config: {e}")
             return DEFAULT_CONFIG.copy()
     data = DEFAULT_CONFIG.copy()
-    _ensure_llm_config(data)
+    ensure_llm_config(data)
     return data
-
-def _ensure_llm_config(cfg: dict) -> None:
-    try:
-        prompts = cfg.get("llm_prompts")
-        if not isinstance(prompts, list):
-            prompts = []
-        norm = []
-        for i in range(5):
-            item = prompts[i] if i < len(prompts) else {}
-            name = str(item.get("name", "")) if isinstance(item, dict) else ""
-            text = str(item.get("text", "")) if isinstance(item, dict) else ""
-            overrides = item.get("overrides", {}) if isinstance(item, dict) else {}
-            if not isinstance(overrides, dict):
-                overrides = {}
-            norm.append({"name": name, "text": text, "overrides": overrides})
-        cfg["llm_prompts"] = norm
-        if not any(p.get("text") for p in norm) and cfg.get("anthropic_prompt"):
-            cfg["llm_prompts"][0]["text"] = str(cfg.get("anthropic_prompt", ""))
-            cfg.setdefault("llm_prompt_active", 0)
-        try:
-            idx = int(cfg.get("llm_prompt_active", 0))
-        except Exception:
-            idx = 0
-        if idx < 0 or idx > 4:
-            cfg["llm_prompt_active"] = 0
-        cfg["llm_per_prompt_overrides"] = bool(cfg.get("llm_per_prompt_overrides", False))
-    except Exception:
-        cfg["llm_prompts"] = [
-            {"name": "", "text": "", "overrides": {}},
-            {"name": "", "text": "", "overrides": {}},
-            {"name": "", "text": "", "overrides": {}},
-            {"name": "", "text": "", "overrides": {}},
-            {"name": "", "text": "", "overrides": {}},
-        ]
-        cfg["llm_prompt_active"] = 0
-        cfg["llm_per_prompt_overrides"] = False
 
 
 def save_config(cfg: dict) -> None:
@@ -150,39 +115,6 @@ def save_config(cfg: dict) -> None:
     except (OSError, IOError, PermissionError) as e:
         print(f"Error: Could not save config: {e}")
 
-
-def parse_hotkey_string(text: Optional[str]):
-    """Convert a hotkey like 'ctrl+shift+e' into a pynput combo set."""
-    from pynput import keyboard
-
-    if not text:
-        return None
-
-    parts = [p.strip().lower() for p in text.split('+') if p.strip()]
-    combo = set()
-    for p in parts:
-        if p in ("ctrl", "control"):
-            combo.add(keyboard.Key.ctrl)
-        elif p in ("cmd", "command", "meta"):
-            combo.add(keyboard.Key.cmd)
-        elif p in ("alt", "option"):
-            combo.add(keyboard.Key.alt)
-        elif p == "shift":
-            combo.add(keyboard.Key.shift)
-        elif len(p) == 1:
-            combo.add(keyboard.KeyCode.from_char(p))
-        elif p.startswith('f') and p[1:].isdigit():
-            try:
-                combo.add(getattr(keyboard.Key, p))
-            except AttributeError:
-                pass
-        elif p in ("space", "tab", "enter", "return", "backspace", "esc", "escape"):
-            key_name = "esc" if p == "escape" else ("enter" if p == "return" else p)
-            try:
-                combo.add(getattr(keyboard.Key, key_name))
-            except AttributeError:
-                pass
-    return combo or None
 
 
 class WindowsTrayApp:
@@ -269,7 +201,7 @@ class WindowsTrayApp:
             # Attach callback for conversions
             def on_conversion(filepath: str):
                 if filepath and self.config.get("show_notifications", True):
-                    self.tray.showMessage("ePub Created", os.path.basename(filepath))
+                    self._notify("ePub Created", os.path.basename(filepath), severity="info")
                 # Auto-open
                 if filepath and self.config.get("auto_open", False):
                     try:
@@ -280,6 +212,16 @@ class WindowsTrayApp:
                 QTimer.singleShot(250, self._refresh_recent_menu)
 
             self.converter.conversion_callback = on_conversion
+            # Surface converter errors to the user
+            def on_error(event):
+                try:
+                    if isinstance(event, ErrorEvent):
+                        self._notify(event.title, event.message, severity=str(getattr(event, 'severity', 'error') or 'error'))
+                    else:
+                        self._notify("Error", str(event), severity="error")
+                except Exception:
+                    pass
+            self.converter.error_callback = on_error
         except Exception as e:
             # Minimal fallback
             print(f"Error creating converter: {e}")
@@ -308,14 +250,9 @@ class WindowsTrayApp:
 
         # LLM prompts as first-level actions
         try:
-            for i, p in enumerate(self.config.get("llm_prompts", [])):
-                text = (p or {}).get("text", "") if isinstance(p, dict) else ""
-                if not str(text).strip():
-                    continue
-                name = (p or {}).get("name", "") if isinstance(p, dict) else ""
-                label = name.strip() or f"Prompt {i+1}"
+            for idx, label in get_prompt_menu_items(self.config):
                 act = QAction(f"LLM - {label}", self.menu)
-                act.triggered.connect((lambda _=False, idx=i: self._convert_with_llm(idx)))
+                act.triggered.connect((lambda _=False, i=idx: self._convert_with_llm(i)))
                 self.menu.addAction(act)
         except Exception as e:
             print(f"LLM menu build error: {e}")
@@ -394,14 +331,14 @@ class WindowsTrayApp:
         try:
             path = self.converter.convert_clipboard_content()
             if path and self.config.get("show_notifications", True):
-                self.tray.showMessage("ePub Created", os.path.basename(path))
+                self._notify("ePub Created", os.path.basename(path), severity="info")
             if path and self.config.get("auto_open", False):
                 try:
                     os.startfile(path)  # type: ignore[attr-defined]
                 except (OSError, AttributeError) as e:
                     print(f"Warning: Could not open file: {e}")
         except Exception as e:
-            self.tray.showMessage("Error", f"Conversion failed: {e}")
+            self._notify("Conversion Error", f"Conversion failed: {e}", severity="error")
 
     def _open_folder(self):
         folder = self.config.get("output_directory", str(paths.get_default_output_dir()))
@@ -446,11 +383,30 @@ class WindowsTrayApp:
             elif tk_path.exists():
                 res = run(tk_path)
 
-            # Reload config and rebuild converter and menu
+            # Reload configuration from disk
             self.config = load_config()
+
+            # Stop current converter listener if running
+            try:
+                if self.converter:
+                    self.converter.stop_listening()
+            except Exception:
+                pass
+
+            # Rebuild converter with new settings
             self._build_converter()
+            # Reset listener thread so it can be started again
+            self.converter_thread = None
+
+            # Rebuild menu (including LLM entries) and restart listeners/hotkeys
             self._build_menu()
-            self._setup_llm_hotkey()
+
+            # Ensure activity callback uses the new converter instance
+            try:
+                if self.converter:
+                    self.converter.activity_callback = lambda snap: QTimer.singleShot(50, self._refresh_activity)
+            except Exception:
+                pass
 
             # Optional feedback
             if res and res.returncode != 0:
@@ -499,88 +455,42 @@ class WindowsTrayApp:
                     try:
                         if not self.converter:
                             return
-                        # Resolve selected prompt + overrides
-                        prompts = self.config.get("llm_prompts", [])
-                        use_idx = int(self.config.get("llm_prompt_active", 0)) if index is None else int(index)
-                        if use_idx < 0 or use_idx >= len(prompts):
+                        # Resolve selected prompt overrides centrally
+                        try:
+                            use_idx = int(self.config.get("llm_prompt_active", 0)) if index is None else int(index)
+                        except Exception:
                             use_idx = 0
-                        item = prompts[use_idx] if isinstance(prompts, list) else {}
-                        overrides = {}
-                        if bool(self.config.get("llm_per_prompt_overrides", False)):
-                            ov = (item or {}).get("overrides", {}) or {}
-                            if isinstance(ov, dict):
-                                overrides = ov.copy()
-                        overrides["system_prompt"] = str((item or {}).get("text", ""))
+                        overrides = build_overrides_for_prompt(self.config, use_idx)
                         # Run async path with captured URL to avoid clipboard races
                         path = asyncio.run(self.converter.convert_clipboard_content_async(clipboard_content=captured_url, llm_overrides=overrides))
                         if path:
                             if self.config.get("show_notifications", True):
-                                self.tray.showMessage("ePub Created", os.path.basename(path))
+                                self._notify("ePub Created", os.path.basename(path), severity="info")
                             if self.config.get("auto_open", False):
                                 try:
                                     os.startfile(path)  # type: ignore[attr-defined]
                                 except Exception:
                                     pass
                         else:
-                            self.tray.showMessage("Conversion Error", "Could not create ePub from YouTube subtitles")
+                            self._notify("Conversion Error", "Could not create ePub from YouTube subtitles", severity="error")
                     except Exception as e:
-                        self.tray.showMessage("LLM Error", str(e))
+                        self._notify("LLM Error", str(e), severity="error")
 
                 threading.Thread(target=run_youtube, daemon=True).start()
                 return
 
-            provider = str(self.config.get("llm_provider", "anthropic")).strip().lower()
-            if provider == "openrouter":
-                api_key = os.environ.get("OPENROUTER_API_KEY") or str(self.config.get("openrouter_api_key", ""))
-                model = str(self.config.get("anthropic_model", "anthropic/claude-sonnet-4.5")) or "anthropic/claude-sonnet-4.5"
-                if "/" not in model:
-                    if model.lower() in {"claude-4.5-sonnet", "claude-sonnet-4.5", "sonnet-4.5"}:
-                        model = "anthropic/claude-sonnet-4.5"
-            else:
-                api_key = os.environ.get("ANTHROPIC_API_KEY") or str(self.config.get("anthropic_api_key", ""))
-                model = str(self.config.get("anthropic_model", "claude-4.5-sonnet")) or "claude-4.5-sonnet"
-                if "/" in model:
-                    if model.lower() in {"anthropic/claude-sonnet-4.5"}:
-                        model = "claude-4.5-sonnet"
-            prompts = self.config.get("llm_prompts", [])
-            use_idx = int(self.config.get("llm_prompt_active", 0)) if index is None else int(index)
-            if use_idx < 0 or use_idx >= len(prompts):
-                use_idx = 0
-            item = prompts[use_idx] if isinstance(prompts, list) else {}
-            prompt = str((item or {}).get("text", "")) or str(self.config.get("anthropic_prompt", ""))
-            if bool(self.config.get("llm_per_prompt_overrides", False)):
-                ov = (item or {}).get("overrides", {}) or {}
-                if isinstance(ov, dict):
-                    model = str(ov.get("model", model) or model)
-                    try:
-                        max_tokens = int(ov.get("max_tokens", self.config.get("anthropic_max_tokens", 2048)))
-                    except Exception:
-                        max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                    try:
-                        temperature = float(ov.get("temperature", self.config.get("anthropic_temperature", 0.2)))
-                    except Exception:
-                        temperature = float(self.config.get("anthropic_temperature", 0.2))
-                    try:
-                        timeout_s = int(ov.get("timeout_seconds", self.config.get("anthropic_timeout_seconds", 60)))
-                    except Exception:
-                        timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                    try:
-                        retries = int(ov.get("retry_count", self.config.get("anthropic_retry_count", 10)))
-                    except Exception:
-                        retries = int(self.config.get("anthropic_retry_count", 10))
-                else:
-                    max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                    temperature = float(self.config.get("anthropic_temperature", 0.2))
-                    timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                    retries = int(self.config.get("anthropic_retry_count", 10))
-            else:
-                max_tokens = int(self.config.get("anthropic_max_tokens", 2048))
-                temperature = float(self.config.get("anthropic_temperature", 0.2))
-                timeout_s = int(self.config.get("anthropic_timeout_seconds", 60))
-                retries = int(self.config.get("anthropic_retry_count", 10))
+            params = resolve_prompt_params(self.config, index)
+            api_key = params.get("api_key", "")
+            model = params.get("model", "anthropic/claude-sonnet-4.5")
+            prompt = params.get("system_prompt", "")
+            max_tokens = int(params.get("max_tokens", 2048))
+            temperature = float(params.get("temperature", 0.2))
+            timeout_s = int(params.get("timeout_seconds", 60))
+            retries = int(params.get("retry_count", 10))
 
             if not api_key or not prompt:
-                self.tray.showMessage("Anthropic", "Configure API Key and Prompt in Settings")
+                provider_label = params.get("provider_label", "LLM")
+                self.tray.showMessage(provider_label, "Configure API Key and Prompt in Settings")
                 return
 
             if not clip_text.strip():
@@ -589,13 +499,19 @@ class WindowsTrayApp:
 
             def run():
                 try:
-                    try:
-                        from src.llm_anthropic import process_text, sanitize_first_line  # type: ignore
-                    except Exception:
-                        from llm_anthropic import process_text, sanitize_first_line  # type: ignore
+                    from .llm.base import LLMRequest
+                    from .llm.anthropic import AnthropicProvider
+                    from .llm.openrouter import OpenRouterProvider
+                    from .llm_anthropic import sanitize_first_line  # type: ignore
 
-                    md = process_text(
-                        str(clip_text),
+                    provider_name = str(provider or "openrouter").strip().lower()
+                    if provider_name == "openrouter":
+                        llm_provider = OpenRouterProvider()
+                    else:
+                        llm_provider = AnthropicProvider()
+
+                    request = LLMRequest(
+                        text=str(clip_text),
                         api_key=str(api_key),
                         model=str(model),
                         system_prompt=str(prompt),
@@ -605,8 +521,11 @@ class WindowsTrayApp:
                         retries=int(retries),
                     )
 
+                    md = llm_provider.process(request)
+
                     title = sanitize_first_line(md)
-                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=["anthropic"]) if self.converter else None
+                    tags = ["anthropic"] if provider_name != "openrouter" else ["openrouter"]
+                    path = self.converter.convert_text_to_epub(md, suggested_title=title, tags=tags) if self.converter else None
                     if path:
                         if self.config.get("show_notifications", True):
                             self.tray.showMessage("ePub Created", os.path.basename(path))
@@ -678,6 +597,22 @@ class WindowsTrayApp:
 
     def _refresh_activity(self):
         self._activity_tick()
+
+    # ---- Notifications ----
+    def _notify(self, title: str, message: str, *, severity: str = "info") -> None:
+        try:
+            icon = QSystemTrayIcon.Information
+            sev = (severity or "").lower()
+            if sev == "warning":
+                icon = QSystemTrayIcon.Warning
+            elif sev == "error":
+                icon = QSystemTrayIcon.Critical
+            self.tray.showMessage(title, message, icon)
+        except Exception:
+            try:
+                self.tray.showMessage(title, message)
+            except Exception:
+                pass
 
 
 def main():

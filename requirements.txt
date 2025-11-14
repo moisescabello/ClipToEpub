@@ -1,4 +1,6 @@
 # Core dependencies for Phase 1
+# For reproducible installs, use together with constraints.txt:
+#   pip install -r requirements.txt -c constraints.txt
 ebooklib==0.18        # ePub generation
 pyperclip==1.8.2      # Clipboard access
 pynput==1.7.6         # Global hotkey capture

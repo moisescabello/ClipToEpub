@@ -12,10 +12,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from collections import deque
 import threading
-try:
-    from src import paths as paths  # type: ignore
-except Exception:
-    import paths  # type: ignore
+from . import paths as paths
 
 logger = logging.getLogger('HistoryManager')
 

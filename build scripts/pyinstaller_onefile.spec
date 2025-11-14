@@ -7,7 +7,7 @@ block_cipher = None
 project_root = os.path.abspath('.')
 
 a = Analysis(
-    ['src/tray_app_windows.py'],
+    ['src/cliptoepub/tray_app_windows.py'],
     pathex=[project_root],
     binaries=[],
     datas=[
@@ -15,7 +15,7 @@ a = Analysis(
         ('resources/*', 'resources'),
     ],
     hiddenimports=[
-        'content_processor',
+        'cliptoepub.content_processor',
         'bs4',
         'newspaper',
         'lxml_html_clean',

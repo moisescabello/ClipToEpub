@@ -37,9 +37,14 @@ source venv/bin/activate
 2. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
+# Or for a more reproducible install (pinned versions):
+pip install -r requirements.txt -c constraints.txt
 # Optional: YouTube subtitles support
 pip install yt-dlp
 ```
+
+Note on dependencies:
+- The package to install via pip is `newspaper3k`, but the Python import name is `newspaper`. This is expected and already handled by `requirements.txt`.
 
 3. **Grant necessary permissions (macOS):**
    - Go to System Settings → Privacy & Security → Accessibility
@@ -53,7 +58,7 @@ pip install yt-dlp
 source venv/bin/activate
 ./run_menubar.sh
 # or
-python src/menubar_app.py
+python -m cliptoepub.menubar_app
 ```
 
 - Default hotkey: Cmd + Shift + E
@@ -74,7 +79,7 @@ YouTube subtitles capture:
 ```bat
 run_tray_windows.bat
 :: or
-python src\tray_app_windows.py
+python -m cliptoepub.tray_app_windows
 ```
 
 - Default hotkey: Ctrl + Shift + E
@@ -125,8 +130,9 @@ YouTube subtitles settings:
 ```
 ClipToEpub/
 ├── src/
-│   ├── menubar_app.py           # macOS menu bar app
-│   ├── tray_app_windows.py      # Windows tray app (PySide6)
+│   ├── cliptoepub/
+│   │   ├── menubar_app.py           # macOS menu bar app
+│   │   ├── tray_app_windows.py      # Windows tray app (PySide6)
 │   ├── converter.py             # Unified converter module
 │   ├── llm_anthropic.py         # Anthropic LLM integration (SDK + REST fallback)
 │   ├── config_window_qt.py      # Settings (Qt, preferred)
@@ -221,7 +227,7 @@ Using Mistral Medium 3.1 via OpenRouter
 
 ### Module not found errors
 - Make sure virtual environment is activated
-- Reinstall requirements: `pip install -r requirements.txt`
+- Reinstall requirements: `pip install -r requirements.txt` (or `pip install -r requirements.txt -c constraints.txt` for a reproducible setup)
 - If you see "lxml.html.clean is now a separate project": `pip install lxml_html_clean`
 - If you see Anthropic auth errors (401/403): check your API key in Settings or `ANTHROPIC_API_KEY`.
 - If you target Sonnet 4.5 and get model not found: use OpenRouter with model `anthropic/claude-sonnet-4.5` and set `OPENROUTER_API_KEY`.

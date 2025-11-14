@@ -16,7 +16,7 @@ APP_EMAIL = 'contact@cliptoepub.app'
 
 # Determine the main app file based on what the user wants
 # Default to menubar app which provides the full GUI experience
-APP = ['src/menubar_app.py']
+APP = ['src/cliptoepub/menubar_app.py']
 
 # Data files to include
 DATA_FILES = [
@@ -95,14 +95,14 @@ OPTIONS = {
         'CoreFoundation',  # macOS Framework
         'objc',  # PyObjC bridge
         'lxml_html_clean',  # Clean HTML module
-        'src.imp_patch',  # Compatibility patch for imp
-        'src.converter',
-        'src.config_window',
-        'src.edit_window',
-        'src.history_manager',
-        'content_processor',
-        'src.image_handler',
-        'src.update_checker',
+        'cliptoepub.imp_patch',  # Compatibility patch for imp
+        'cliptoepub.converter',
+        'cliptoepub.config_window',
+        'cliptoepub.edit_window',
+        'cliptoepub.history_manager',
+        'cliptoepub.content_processor',
+        'cliptoepub.image_handler',
+        'cliptoepub.update_checker',
     ],
     'excludes': [
         'matplotlib',  # Exclude unnecessary large packages
