@@ -108,6 +108,8 @@ DEFAULTS = {
     "youtube_prefer_native": True,
     # LLM defaults
     "anthropic_api_key": "",
+    # Control whether API keys are persisted in config (plaintext)
+    "llm_store_keys_in_config": True,
     # Default model for OpenRouter (Sonnet 4.5 – 1M)
     "anthropic_model": "anthropic/claude-sonnet-4.5",
     "anthropic_prompt": "",
@@ -223,12 +225,13 @@ if HAVE_QT:
             # Provider/API key presence
             try:
                 provider = (cfg.get("llm_provider", "openrouter") or "").strip().lower()
+                store_keys = bool(cfg.get("llm_store_keys_in_config", True))
                 if provider == "anthropic":
-                    if not (cfg.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")):
-                        warnings.append("Anthropic provider selected but no API key configured.")
+                    if not (os.getenv("ANTHROPIC_API_KEY") or (store_keys and cfg.get("anthropic_api_key"))):
+                        warnings.append("Anthropic provider selected but no API key configured (env or config).")
                 elif provider == "openrouter":
-                    if not (cfg.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")):
-                        warnings.append("OpenRouter provider selected but no API key configured.")
+                    if not (os.getenv("OPENROUTER_API_KEY") or (store_keys and cfg.get("openrouter_api_key"))):
+                        warnings.append("OpenRouter provider selected but no API key configured (env or config).")
             except Exception:
                 pass
 
@@ -431,6 +434,21 @@ if HAVE_QT:
             self.openrouter_key_edit = QLineEdit(self.config.get("openrouter_api_key", ""))
             self.openrouter_key_edit.setEchoMode(QLineEdit.Password)
             form.addRow("OpenRouter API Key:", self.openrouter_key_edit)
+
+            # Store-keys toggle and hint about environment variables vs. stored keys
+            try:
+                self.store_keys_chk = QCheckBox("Store API keys in config file (plaintext)")
+                self.store_keys_chk.setChecked(bool(self.config.get("llm_store_keys_in_config", True)))
+                form.addRow(self.store_keys_chk)
+
+                hint = QLabel(
+                    "Environment variables ANTHROPIC_API_KEY / OPENROUTER_API_KEY take precedence over these fields.\n"
+                    "Leave keys empty and/or disable storing to avoid plaintext in the config file."
+                )
+                hint.setWordWrap(True)
+                form.addRow("", hint)
+            except Exception:
+                pass
 
             # Model
             self.anthropic_model_edit = QLineEdit(self.config.get("anthropic_model", DEFAULTS["anthropic_model"]))
@@ -674,11 +692,13 @@ if HAVE_QT:
 
                     provider = str(self.provider_combo.currentData() or "anthropic").strip().lower()
                     if provider == "openrouter":
-                        api_key = self.openrouter_key_edit.text().strip() or os.environ.get("OPENROUTER_API_KEY", "")
+                        # Prefer environment variable, fall back to stored value
+                        api_key = os.environ.get("OPENROUTER_API_KEY", "") or self.openrouter_key_edit.text().strip()
                         model = self.anthropic_model_edit.text().strip() or "anthropic/claude-sonnet-4.5"
                         llm_provider = OpenRouterProvider()
                     else:
-                        api_key = self.anthropic_key_edit.text().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+                        # Prefer environment variable, fall back to stored value
+                        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or self.anthropic_key_edit.text().strip()
                         model = self.anthropic_model_edit.text().strip() or DEFAULTS["anthropic_model"]
                         llm_provider = AnthropicProvider()
 
@@ -768,8 +788,6 @@ if HAVE_QT:
                 "youtube_prefer_native": bool(self.yt_prefer_native.isChecked()),
                 # LLM
                 "llm_provider": str(self.provider_combo.currentData() or DEFAULTS["llm_provider"]),
-                "anthropic_api_key": self.anthropic_key_edit.text().strip(),
-                "openrouter_api_key": self.openrouter_key_edit.text().strip(),
                 "anthropic_model": self.anthropic_model_edit.text().strip() or DEFAULTS["anthropic_model"],
                 "anthropic_max_tokens": int(self.anthropic_max_tokens_spin.value()),
                 "anthropic_temperature": float(self.anthropic_temperature_spin.value()),
@@ -777,6 +795,21 @@ if HAVE_QT:
                 "anthropic_retry_count": int(self.anthropic_retry_spin.value()),
                 "anthropic_hotkey": self.anthropic_hotkey_edit.text().strip() or DEFAULTS["anthropic_hotkey"],
             }
+
+            # API key persistence policy
+            store_keys = True
+            try:
+                store_keys = bool(self.store_keys_chk.isChecked())
+            except Exception:
+                store_keys = True
+            cfg["llm_store_keys_in_config"] = store_keys
+            if store_keys:
+                cfg["anthropic_api_key"] = self.anthropic_key_edit.text().strip()
+                cfg["openrouter_api_key"] = self.openrouter_key_edit.text().strip()
+            else:
+                # Do not persist API keys in config when disabled
+                cfg["anthropic_api_key"] = ""
+                cfg["openrouter_api_key"] = ""
 
             # Normalize model/provider coherence to avoid auth/API mismatch
             try:

@@ -51,6 +51,7 @@ class ConfigWindow:
             "youtube_prefer_native": True,
             # LLM defaults
             "anthropic_api_key": "",
+            "llm_store_keys_in_config": True,
             # Default model for OpenRouter (Sonnet 4.5 – 1M)
             "anthropic_model": "anthropic/claude-sonnet-4.5",
             "anthropic_prompt": "",
@@ -130,8 +131,15 @@ class ConfigWindow:
 
             # LLM settings
             self.config["llm_provider"] = (self.llm_provider_var.get() or self.default_config["llm_provider"]).strip()
-            self.config["anthropic_api_key"] = self.anthropic_api_key_var.get().strip()
-            self.config["openrouter_api_key"] = self.openrouter_api_key_var.get().strip()
+            store_keys = bool(self.llm_store_keys_var.get())
+            self.config["llm_store_keys_in_config"] = store_keys
+            if store_keys:
+                self.config["anthropic_api_key"] = self.anthropic_api_key_var.get().strip()
+                self.config["openrouter_api_key"] = self.openrouter_api_key_var.get().strip()
+            else:
+                # Do not persist API keys in config when disabled
+                self.config["anthropic_api_key"] = ""
+                self.config["openrouter_api_key"] = ""
             self.config["anthropic_model"] = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
             # Multi-prompt from UI
             prompts = []
@@ -238,12 +246,13 @@ class ConfigWindow:
             # Surface non-blocking warnings relevant to runtime behavior
             try:
                 provider = (self.config.get("llm_provider", "openrouter") or "").strip().lower()
+                store_keys = bool(self.config.get("llm_store_keys_in_config", True))
                 if provider == "anthropic":
-                    if not (self.config.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY")):
-                        warnings.append("Anthropic provider selected but no API key configured.")
+                    if not (os.getenv("ANTHROPIC_API_KEY") or (store_keys and self.config.get("anthropic_api_key"))):
+                        warnings.append("Anthropic provider selected but no API key configured (env or config).")
                 elif provider == "openrouter":
-                    if not (self.config.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")):
-                        warnings.append("OpenRouter provider selected but no API key configured.")
+                    if not (os.getenv("OPENROUTER_API_KEY") or (store_keys and self.config.get("openrouter_api_key"))):
+                        warnings.append("OpenRouter provider selected but no API key configured (env or config).")
             except Exception:
                 pass
 
@@ -643,6 +652,23 @@ class ConfigWindow:
         )
         provider_combo.grid(row=9, column=1, sticky=tk.W)
 
+        # Store-keys toggle
+        self.llm_store_keys_var = tk.BooleanVar(value=bool(self.config.get("llm_store_keys_in_config", True)))
+        ttk.Checkbutton(
+            llm_frame,
+            text="Store API keys in config file (plaintext)",
+            variable=self.llm_store_keys_var,
+        ).grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+
+        # Hint about environment variables vs. stored keys
+        ttk.Label(
+            llm_frame,
+            text="Tip: ANTHROPIC_API_KEY / OPENROUTER_API_KEY override these fields.\n"
+                 "Leave keys blank and/or disable storing to avoid plaintext in config.",
+            foreground="#555",
+            justify=tk.LEFT,
+        ).grid(row=11, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+
         def _test_llm():
             try:
                 from .llm.base import LLMRequest
@@ -651,11 +677,13 @@ class ConfigWindow:
 
                 provider = (self.llm_provider_var.get() or "anthropic").strip().lower()
                 if provider == "openrouter":
-                    api_key = self.openrouter_api_key_var.get().strip() or os.environ.get("OPENROUTER_API_KEY", "")
+                    # Prefer environment variable, fall back to stored value
+                    api_key = os.environ.get("OPENROUTER_API_KEY", "") or self.openrouter_api_key_var.get().strip()
                     model = self.anthropic_model_var.get().strip() or "anthropic/claude-sonnet-4.5"
                     llm_provider = OpenRouterProvider()
                 else:
-                    api_key = self.anthropic_api_key_var.get().strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+                    # Prefer environment variable, fall back to stored value
+                    api_key = os.environ.get("ANTHROPIC_API_KEY", "") or self.anthropic_api_key_var.get().strip()
                     model = self.anthropic_model_var.get().strip() or self.default_config["anthropic_model"]
                     llm_provider = AnthropicProvider()
 
@@ -812,6 +840,7 @@ class ConfigWindow:
             try:
                 self.llm_provider_var.set(self.default_config.get("llm_provider", "anthropic"))
                 self.openrouter_api_key_var.set("")
+                self.llm_store_keys_var.set(bool(self.default_config.get("llm_store_keys_in_config", True)))
             except Exception:
                 pass
             self.anthropic_model_var.set(self.default_config["anthropic_model"])

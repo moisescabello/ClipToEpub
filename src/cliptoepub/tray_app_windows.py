@@ -62,6 +62,8 @@ DEFAULT_CONFIG = {
     "youtube_prefer_native": True,
     # LLM defaults
     "anthropic_api_key": "",
+    # Control whether API keys are persisted in config (plaintext)
+    "llm_store_keys_in_config": True,
     # Default model for OpenRouter (Sonnet 4.5 – 1M)
     "anthropic_model": "anthropic/claude-sonnet-4.5",
     "anthropic_prompt": "",

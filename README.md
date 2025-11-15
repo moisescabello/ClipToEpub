@@ -112,13 +112,19 @@ LLM settings (persisted in the same config):
   - `anthropic_model` (default: `anthropic/claude-sonnet-4.5`)
   - `anthropic_max_tokens`, `anthropic_temperature`, `anthropic_timeout_seconds`, `anthropic_retry_count`
   - `llm_provider` (`anthropic` | `openrouter`), `openrouter_api_key`
+  - `llm_store_keys_in_config` (bool; if `false`, API keys are not persisted to disk)
   - `anthropic_prompt` (legacy; se mantiene sincronizado con el prompt activo)
 - Multi‑prompt:
   - `llm_prompts` (lista de 5): cada elemento `{ name, text, overrides? }`
   - `llm_prompt_active` (0..4) — usado por el hotkey LLM
   - `llm_per_prompt_overrides` (bool) — si true, se aplican overrides por‑prompt
 
-You can also set `OPENROUTER_API_KEY` (default provider) or `ANTHROPIC_API_KEY` as environment variables; they override the stored keys at runtime.
+You can also set `OPENROUTER_API_KEY` (default provider) or `ANTHROPIC_API_KEY` as environment variables; they override any keys stored in the config file and are the recommended way to provide secrets.
+
+LLM API key handling:
+- At runtime, the app always prefers environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) and only uses `anthropic_api_key` / `openrouter_api_key` from the config as a fallback.
+- In the LLM Settings (Tk/Qt), you can choose whether to store API keys in the config file using the “Store API keys in config file (plaintext)” option.
+- For better security, leave that option disabled and keep the key fields empty, using only environment variables so that no API keys are written to the JSON config.
 
 YouTube subtitles settings:
 - Preferred language 1, 2, 3 (from a curated list of top YouTube languages including `en`, `es`, `pt`, `hi`, `id`, `ar`, `ru`, `ja`, `ko`, `fr`, `de`, `tr`).

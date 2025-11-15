@@ -868,11 +868,13 @@ class ClipboardToEpubConverter:
         provider_name = (self.llm_provider or "anthropic").strip().lower()
         if provider_name == "openrouter":
             provider = OpenRouterProvider()
-            api_key = (self.openrouter_api_key or "").strip() or os.environ.get("OPENROUTER_API_KEY", "")
+            # Prefer environment variable, fall back to stored config
+            api_key = os.environ.get("OPENROUTER_API_KEY", "") or (self.openrouter_api_key or "").strip()
             model = self.anthropic_model or "anthropic/claude-sonnet-4.5"
         else:
             provider = AnthropicProvider()
-            api_key = (self.anthropic_api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+            # Prefer environment variable, fall back to stored config
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "") or (self.anthropic_api_key or "").strip()
             # Use Anthropic-native model ids for this provider
             model = self.anthropic_model or "claude-4.5-sonnet"
         ov = llm_overrides or {}
