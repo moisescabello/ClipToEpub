@@ -30,12 +30,19 @@ from . import paths as paths
 from .content_processor import process_clipboard_content
 from .history_manager import ClipboardAccumulator, ConversionCache, ConversionHistory
 from .image_handler import ImageHandler
-from .edit_window import PreConversionEditor
 from .errors import notify_error
 from .llm.base import LLMRequest
 from .llm.anthropic import AnthropicProvider
 from .llm.openrouter import OpenRouterProvider
 
+# Optional edit window (Tkinter may be unavailable in some Python builds)
+try:  # pragma: no cover - environment dependent
+    from .edit_window import PreConversionEditor  # type: ignore
+except Exception as e:  # pragma: no cover - best‑effort fallback
+    PreConversionEditor = None  # type: ignore[assignment]
+    logging.getLogger("ClipboardToEpub").warning(
+        f"Edit window disabled (Tkinter not available): {e}"
+    )
 
 # Logging
 logging.basicConfig(
@@ -457,8 +464,9 @@ class ClipboardToEpubConverter:
                     logger.warning("No content to convert")
                     return None
 
-                # Optional edit window first so user changes affect processing and caching
-                if self.enable_edit_window and not use_accumulator:
+                # Optional edit window first so user changes affect processing and caching.
+                # Only enabled when Tkinter edit window is available.
+                if self.enable_edit_window and PreConversionEditor is not None and not use_accumulator:
                     edited_content, edited_meta = await self._show_edit_window_async(content, metadata)
                     if edited_content:
                         content = edited_content

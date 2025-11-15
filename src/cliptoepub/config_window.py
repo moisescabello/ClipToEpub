@@ -10,8 +10,19 @@ import json
 from pathlib import Path
 import sys
 import os
-from . import paths as paths
-from .llm_config import ensure_llm_config, sync_legacy_prompt
+
+try:
+    # Normal package import (when run as cliptoepub.config_window)
+    from . import paths as paths
+    from .llm_config import ensure_llm_config, sync_legacy_prompt
+except ImportError:
+    # Allow running as a standalone script (subprocess call with no package context)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    import cliptoepub.paths as paths  # type: ignore
+    from cliptoepub.llm_config import ensure_llm_config, sync_legacy_prompt  # type: ignore
+
 import tempfile
 
 

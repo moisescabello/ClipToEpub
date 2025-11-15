@@ -41,7 +41,26 @@ def _warm_mac_keyboard_apis():
         pass
     try:
         import Quartz
-        _ = Quartz.CFRunLoopAddSource
+        # Touch the Quartz symbols used by pynput's keyboard backend to
+        # force PyObjC's lazy importer to resolve them on the main thread.
+        # This avoids rare KeyError crashes when they are first accessed
+        # from background event tap threads.
+        for name in (
+            "CFRunLoopAddSource",
+            "CGEventGetIntegerValueField",
+            "CGEventKeyboardGetUnicodeString",
+            "CGEventGetFlags",
+            "CGEventGetType",
+            "kCGKeyboardEventKeycode",
+            "kCGEventKeyDown",
+            "kCGEventKeyUp",
+            "NSSystemDefined",
+            "NSEvent",
+        ):
+            try:
+                getattr(Quartz, name)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -51,11 +70,13 @@ class ClipToEpubApp(rumps.App):
 
     def __init__(self):
         # Prefer app icon over emoji to look more native
+        icon_path = None
         try:
-            icon_path = (Path(__file__).resolve().parent.parent / "resources" / "icon.png")
+            # src/cliptoepub/... -> project_root/resources/icon.png in dev
+            # Contents/Resources/src/cliptoepub/... -> Contents/Resources/resources/icon.png in bundles
+            icon_path = Path(__file__).resolve().parents[2] / "resources" / "icon.png"
         except (OSError, RuntimeError) as e:
             print(f"Warning: Could not resolve icon path: {e}")
-            icon_path = None
 
         super(ClipToEpubApp, self).__init__(
             "ClipToEpub",
